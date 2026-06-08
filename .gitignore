@@ -1,0 +1,17 @@
+.DS_Store
+.env
+*.pyc
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+
+backend/.venv/
+backend/.env
+backend/celerybeat-schedule
+backend/storage/
+
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+pgdata/

@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Re: Call Meeting Overlay",
+  "version": "0.1.0",
+  "description": "Visible consent-first recording overlay for Google Meet, Microsoft Teams, and Zoom web meetings.",
+  "icons": {
+    "16": "icons/recall-logo.png",
+    "32": "icons/recall-logo.png",
+    "48": "icons/recall-logo.png",
+    "128": "icons/recall-logo.png"
+  },
+  "permissions": ["downloads", "storage"],
+  "host_permissions": [
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Re: Call",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://meet.google.com/*",
+        "https://teams.microsoft.com/*",
+        "https://*.teams.microsoft.com/*",
+        "https://teams.live.com/*",
+        "https://zoom.us/wc/*",
+        "https://*.zoom.us/wc/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
