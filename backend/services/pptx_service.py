@@ -4,12 +4,14 @@ from uuid import UUID
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
+from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_CONNECTOR
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Meeting
+from services.chart_export_service import chart_cards_for_export, code_snippets_for_export, display_value, numeric_rows
+from services.export_formatting import format_duration
 
 
 NAVY = RGBColor(30, 39, 97)
@@ -19,6 +21,7 @@ MUTED = RGBColor(93, 104, 121)
 GREEN = RGBColor(0, 229, 160)
 CODE_BG = RGBColor(13, 17, 23)
 LIGHT = RGBColor(244, 247, 250)
+EXPORT_FONT = "Times New Roman"
 
 
 def _set_bg(slide, color: RGBColor) -> None:
@@ -27,9 +30,10 @@ def _set_bg(slide, color: RGBColor) -> None:
     fill.fore_color.rgb = color
 
 
-def _textbox(slide, x, y, w, h, text, size=18, color=INK, bold=False, font="Calibri"):
+def _textbox(slide, x, y, w, h, text, size=18, color=INK, bold=False, font=EXPORT_FONT):
     box = slide.shapes.add_textbox(x, y, w, h)
     frame = box.text_frame
+    frame.word_wrap = True
     frame.clear()
     paragraph = frame.paragraphs[0]
     run = paragraph.add_run()
@@ -68,10 +72,24 @@ def _add_bullets(slide, bullets: list[str], x, y, w, h, color=INK) -> None:
         paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
         paragraph.text = bullet
         paragraph.level = 0
-        paragraph.font.name = "Calibri"
+        paragraph.font.name = EXPORT_FONT
         paragraph.font.size = Pt(16)
         paragraph.font.color.rgb = color
         paragraph.space_after = Pt(8)
+
+
+def _style_cell_text(cell, color=INK, bold=False, size=12) -> None:
+    cell.text_frame.word_wrap = True
+    for paragraph in cell.text_frame.paragraphs:
+        paragraph.font.name = EXPORT_FONT
+        paragraph.font.size = Pt(size)
+        paragraph.font.color.rgb = color
+        paragraph.font.bold = bold
+        for run in paragraph.runs:
+            run.font.name = EXPORT_FONT
+            run.font.size = Pt(size)
+            run.font.color.rgb = color
+            run.font.bold = bold
 
 
 def _summary_bullets(summary: str) -> list[str]:
@@ -90,6 +108,189 @@ def _next_step_text(step) -> str:
     task = str(step.get("task") or "Follow up")
     reason = str(step.get("reason") or "").strip()
     return f"[{priority}] {task}" + (f" - {reason}" if reason else "")
+
+
+def _add_chart_slides(prs: Presentation, blank, charts: list[dict]) -> None:
+    for chart in charts:
+        slide = prs.slides.add_slide(blank)
+        _set_bg(slide, WHITE)
+        _title(slide, str(chart.get("title") or "Chart")[:64])
+        chart_type = chart.get("chart_type") or "bar_chart"
+        if chart_type == "needs_data":
+            _draw_missing_chart(slide, chart)
+        elif chart_type == "timeline":
+            _draw_timeline(slide, chart)
+        elif chart_type == "table":
+            _draw_table_chart(slide, chart)
+        elif chart_type == "line_chart":
+            _draw_line_chart(slide, chart)
+        else:
+            _draw_bar_chart(slide, chart)
+        if chart.get("insight"):
+            _textbox(slide, Inches(0.9), Inches(6.65), Inches(11.4), Inches(0.28), str(chart["insight"])[:180], 12, MUTED)
+
+
+def _draw_missing_chart(slide, chart: dict) -> None:
+    card = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(0.95), Inches(1.65), Inches(10.9), Inches(1.35))
+    card.fill.solid()
+    card.fill.fore_color.rgb = LIGHT
+    card.line.color.rgb = RGBColor(224, 230, 237)
+    _textbox(slide, Inches(1.25), Inches(1.98), Inches(10.1), Inches(0.28), "Graph data missing", 19, INK, True)
+    prompt = chart.get("missing_data_prompt") or "A graph request was detected, but structured chart data was not saved."
+    _textbox(slide, Inches(1.25), Inches(2.42), Inches(10.0), Inches(0.32), str(prompt)[:180], 13, MUTED)
+
+
+def _ppt_tick_values(min_value: float, max_value: float) -> list[float]:
+    low = min(min_value, 0)
+    high = max(max_value, 1)
+    if low == high:
+        high = low + 1
+    return [low, low + (high - low) / 2, high]
+
+
+def _ppt_axis_value(value: float) -> str:
+    if abs(value) >= 1000:
+        return f"{value:,.0f}"
+    return str(int(value)) if float(value).is_integer() else f"{value:.1f}"
+
+
+def _draw_bar_chart(slide, chart: dict) -> None:
+    rows = numeric_rows(chart)
+    if not rows:
+        _textbox(slide, Inches(0.95), Inches(1.65), Inches(10.5), Inches(0.35), "No chart data available.", 18, MUTED)
+        return
+    max_value = max(abs(float(row.get("value") or 0)) for row in rows) or 1
+    x_label = Inches(0.95)
+    x_bar = Inches(3.7)
+    y = Inches(1.55)
+    max_width = Inches(7.2)
+    plot = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(3.55), Inches(1.28), Inches(7.75), Inches(5.1))
+    plot.fill.solid()
+    plot.fill.fore_color.rgb = RGBColor(247, 250, 246)
+    plot.line.color.rgb = RGBColor(216, 226, 214)
+    for tick in _ppt_tick_values(0, max_value):
+        x = x_bar + max_width * (tick / max_value)
+        grid = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x, Inches(1.42), x, Inches(6.22))
+        grid.line.color.rgb = RGBColor(224, 232, 222)
+        _textbox(slide, x - Inches(0.2), Inches(6.32), Inches(0.55), Inches(0.18), _ppt_axis_value(tick), 8, MUTED)
+    axis = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x_bar, Inches(6.18), x_bar + max_width, Inches(6.18))
+    axis.line.color.rgb = MUTED
+    if chart.get("y_label"):
+        _textbox(slide, x_label, Inches(1.28), Inches(2.4), Inches(0.2), str(chart["y_label"])[:28], 9, MUTED, True)
+    for row in rows[:8]:
+        label = str(row.get("label") or "")[:34]
+        _textbox(slide, x_label, y + Inches(0.04), Inches(2.45), Inches(0.24), label, 11, INK, True)
+        bg = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, x_bar, y, max_width, Inches(0.24))
+        bg.fill.solid()
+        bg.fill.fore_color.rgb = LIGHT
+        bg.line.fill.background()
+        width = max(Inches(0.12), max_width * (abs(float(row.get("value") or 0)) / max_value))
+        bar = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, x_bar, y, width, Inches(0.24))
+        bar.fill.solid()
+        bar.fill.fore_color.rgb = GREEN
+        bar.line.fill.background()
+        label_x = min(x_bar + width + Inches(0.12), x_bar + max_width - Inches(0.62))
+        _textbox(slide, label_x, y + Inches(0.02), Inches(0.9), Inches(0.22), display_value(row), 11, INK, True)
+        y += Inches(0.56)
+    if chart.get("x_label"):
+        _textbox(slide, x_bar + max_width - Inches(0.65), Inches(6.62), Inches(1.1), Inches(0.18), str(chart["x_label"])[:22], 8, MUTED)
+
+
+def _draw_line_chart(slide, chart: dict) -> None:
+    rows = numeric_rows(chart)
+    if not rows:
+        _textbox(slide, Inches(0.95), Inches(1.65), Inches(10.5), Inches(0.35), "No chart data available.", 18, MUTED)
+        return
+    values = [float(row.get("value") or 0) for row in rows]
+    min_value = min(min(values), 0)
+    max_value = max(values) or 1
+    value_range = max(max_value - min_value, 1)
+    x0 = Inches(0.95)
+    y0 = Inches(5.85)
+    width = Inches(11.2)
+    height = Inches(4.15)
+
+    plot = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(0.82), Inches(1.35), Inches(11.75), Inches(4.85))
+    plot.fill.solid()
+    plot.fill.fore_color.rgb = RGBColor(247, 250, 246)
+    plot.line.color.rgb = RGBColor(216, 226, 214)
+
+    for tick in _ppt_tick_values(min_value, max_value):
+        y = y0 - height * ((tick - min_value) / value_range)
+        grid = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x0, y, x0 + width, y)
+        grid.line.color.rgb = RGBColor(224, 232, 222)
+        _textbox(slide, Inches(0.42), y - Inches(0.08), Inches(0.45), Inches(0.16), _ppt_axis_value(tick), 8, MUTED)
+
+    axis = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x0, y0, x0 + width, y0)
+    axis.line.color.rgb = MUTED
+    y_axis = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, x0, y0, x0, y0 - height)
+    y_axis.line.color.rgb = MUTED
+
+    points = []
+    for index, row in enumerate(rows):
+        x = x0 + (width / 2 if len(rows) == 1 else width * (index / (len(rows) - 1)))
+        y = y0 - height * ((float(row.get("value") or 0) - min_value) / value_range)
+        points.append((x, y, row))
+    for start, end in zip(points, points[1:]):
+        connector = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, start[0], start[1], end[0], end[1])
+        connector.line.color.rgb = GREEN
+        connector.line.width = Pt(2.5)
+    for x, y, row in points:
+        dot = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.OVAL, x - Inches(0.06), y - Inches(0.06), Inches(0.12), Inches(0.12))
+        dot.fill.solid()
+        dot.fill.fore_color.rgb = GREEN
+        dot.line.fill.background()
+        _textbox(slide, x - Inches(0.28), max(Inches(1.23), y - Inches(0.3)), Inches(0.7), Inches(0.18), display_value(row), 8, INK, True)
+        _textbox(slide, x - Inches(0.34), y0 + Inches(0.12), Inches(0.75), Inches(0.2), str(row.get("label") or "")[:10], 8, MUTED)
+    if chart.get("y_label"):
+        _textbox(slide, Inches(0.95), Inches(1.1), Inches(3.0), Inches(0.22), str(chart["y_label"])[:28], 10, MUTED, True)
+    if chart.get("x_label"):
+        _textbox(slide, Inches(11.3), Inches(6.1), Inches(0.9), Inches(0.18), str(chart["x_label"])[:20], 8, MUTED)
+
+
+def _draw_timeline(slide, chart: dict) -> None:
+    rows = chart.get("data") or []
+    if not rows:
+        _textbox(slide, Inches(0.95), Inches(1.65), Inches(10.5), Inches(0.35), "No timeline data available.", 18, MUTED)
+        return
+    x = Inches(1.15)
+    line = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, x, Inches(1.55), Inches(0.035), Inches(4.72))
+    line.fill.solid()
+    line.fill.fore_color.rgb = GREEN
+    line.line.fill.background()
+    y = Inches(1.48)
+    for row in rows[:6]:
+        dot = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.OVAL, x - Inches(0.09), y + Inches(0.04), Inches(0.22), Inches(0.22))
+        dot.fill.solid()
+        dot.fill.fore_color.rgb = GREEN
+        dot.line.fill.background()
+        _textbox(slide, Inches(1.55), y, Inches(2.1), Inches(0.28), str(row.get("label") or "")[:26], 15, INK, True)
+        _textbox(slide, Inches(3.55), y + Inches(0.02), Inches(8.3), Inches(0.35), str(row.get("text") or display_value(row))[:140], 13, MUTED)
+        y += Inches(0.78)
+
+
+def _draw_table_chart(slide, chart: dict) -> None:
+    rows = chart.get("data") or []
+    if not rows:
+        _textbox(slide, Inches(0.95), Inches(1.65), Inches(10.5), Inches(0.35), "No table data available.", 18, MUTED)
+        return
+    table_shape = slide.shapes.add_table(len(rows[:8]) + 1, 2, Inches(0.95), Inches(1.55), Inches(11.3), Inches(4.7))
+    table = table_shape.table
+    table.columns[0].width = Inches(5.4)
+    table.columns[1].width = Inches(5.9)
+    for col, header in enumerate(["Label", "Value"]):
+        cell = table.cell(0, col)
+        cell.text = header
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = NAVY
+        _style_cell_text(cell, WHITE, True)
+    for row_index, row in enumerate(rows[:8], start=1):
+        for col, value in enumerate([row.get("label"), row.get("text") or display_value(row)]):
+            cell = table.cell(row_index, col)
+            cell.text = str(value or "")
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = WHITE if row_index % 2 else LIGHT
+            _style_cell_text(cell)
 
 
 async def generate(session: AsyncSession, meeting_id: UUID) -> Path:
@@ -112,7 +313,7 @@ async def generate(session: AsyncSession, meeting_id: UUID) -> Path:
         Inches(2.62),
         Inches(8.5),
         Inches(0.4),
-        f"{meeting.created_at:%B %d, %Y} | {round(meeting.duration_seconds / 60, 1)} minutes",
+        f"{meeting.created_at:%B %d, %Y} | {format_duration(meeting.duration_seconds)}",
         18,
         GREEN,
     )
@@ -185,14 +386,14 @@ async def generate(session: AsyncSession, meeting_id: UUID) -> Path:
         cell.text = header
         cell.fill.solid()
         cell.fill.fore_color.rgb = NAVY
-        cell.text_frame.paragraphs[0].runs[0].font.color.rgb = WHITE
-        cell.text_frame.paragraphs[0].runs[0].font.bold = True
+        _style_cell_text(cell, WHITE, True)
     for row, action in enumerate(actions[:8], start=1):
         for col, value in enumerate([action.get("owner", "TBD"), action.get("task", ""), action.get("due", "TBD")]):
             cell = table.cell(row, col)
             cell.text = str(value)
             cell.fill.solid()
             cell.fill.fore_color.rgb = WHITE if row % 2 else LIGHT
+            _style_cell_text(cell)
 
     slide = prs.slides.add_slide(blank)
     _set_bg(slide, WHITE)
@@ -219,7 +420,10 @@ async def generate(session: AsyncSession, meeting_id: UUID) -> Path:
         _textbox(slide, x + Inches(0.18), y + Inches(0.12), width - Inches(0.32), Inches(0.16), label, 12, NAVY, True)
         x += width + Inches(0.25)
 
-    snippets = notes.get("code_snippets") or []
+    charts = chart_cards_for_export(notes, meeting.transcript or "")
+    _add_chart_slides(prs, blank, charts)
+
+    snippets = code_snippets_for_export(notes, charts)
     for snippet in snippets:
         slide = prs.slides.add_slide(blank)
         _set_bg(slide, CODE_BG)
@@ -230,7 +434,7 @@ async def generate(session: AsyncSession, meeting_id: UUID) -> Path:
         badge.line.fill.background()
         _textbox(slide, Inches(0.96), Inches(1.45), Inches(1.1), Inches(0.12), snippet.get("language", "code"), 10, CODE_BG, True)
         code = str(snippet.get("code", ""))[:2400]
-        _textbox(slide, Inches(0.85), Inches(1.9), Inches(11.8), Inches(4.85), code, 11, WHITE, False, "Courier New")
+        _textbox(slide, Inches(0.85), Inches(1.9), Inches(11.8), Inches(4.85), code, 11, WHITE)
 
     slide = prs.slides.add_slide(blank)
     _set_bg(slide, NAVY)

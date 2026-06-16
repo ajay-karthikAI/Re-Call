@@ -1,13 +1,32 @@
 import AVFoundation
+import AudioToolbox
 import CoreGraphics
 import CoreMedia
 import Foundation
 import ScreenCaptureKit
 
+let systemSilenceRMSThreshold = 0.002
+let systemSilencePeakThreshold = 0.012
+let minimumUsefulChunkDurationSeconds = 0.35
+
+struct AudioStats {
+    let rms: Double
+    let peak: Double
+    let durationSeconds: Double
+    let sampleCount: Int
+
+    var isSilent: Bool {
+        sampleCount == 0 ||
+            durationSeconds < minimumUsefulChunkDurationSeconds ||
+            (rms < systemSilenceRMSThreshold && peak < systemSilencePeakThreshold)
+    }
+}
+
 struct CaptureArguments {
     let apiBaseURL: URL
     let sessionID: String
     let chunkSeconds: Double
+    let recordingStartedAtMs: Double
 
     static func parse(_ arguments: [String]) throws -> CaptureArguments {
         var values: [String: String] = [:]
@@ -30,7 +49,13 @@ struct CaptureArguments {
         }
 
         let chunkSeconds = Double(values["chunk-seconds"] ?? "6") ?? 6
-        return CaptureArguments(apiBaseURL: apiBaseURL, sessionID: sessionID, chunkSeconds: max(2, chunkSeconds))
+        let recordingStartedAtMs = Double(values["recording-started-at-ms"] ?? "") ?? nowMilliseconds()
+        return CaptureArguments(
+            apiBaseURL: apiBaseURL,
+            sessionID: sessionID,
+            chunkSeconds: max(2, chunkSeconds),
+            recordingStartedAtMs: recordingStartedAtMs
+        )
     }
 }
 
@@ -63,6 +88,10 @@ func emit(_ type: String, _ fields: [String: Any] = [:]) {
     }
 }
 
+func nowMilliseconds() -> Double {
+    Date().timeIntervalSince1970 * 1000
+}
+
 final class ChunkUploader {
     private let uploadURL: URL
     private let sessionID: String
@@ -71,13 +100,19 @@ final class ChunkUploader {
         self.uploadURL = apiBaseURL
             .appendingPathComponent("api")
             .appendingPathComponent("recording")
-            .appendingPathComponent("chunk")
+            .appendingPathComponent("system-chunk")
         self.sessionID = sessionID
     }
 
-    func upload(fileURL: URL) {
+    func upload(fileURL: URL, chunkIndex: Int, startOffsetMs: Double, endOffsetMs: Double, stats: AudioStats) {
         do {
-            let body = try multipartBody(fileURL: fileURL)
+            let body = try multipartBody(
+                fileURL: fileURL,
+                chunkIndex: chunkIndex,
+                startOffsetMs: startOffsetMs,
+                endOffsetMs: endOffsetMs,
+                stats: stats
+            )
             var request = URLRequest(url: uploadURL)
             request.httpMethod = "POST"
             request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
@@ -98,14 +133,33 @@ final class ChunkUploader {
             if let uploadError {
                 emit("upload_error", ["message": uploadError.localizedDescription])
             } else {
-                emit("chunk_uploaded", ["file": fileURL.lastPathComponent])
+                let size = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? NSNumber)?.intValue ?? 0
+                emit(
+                    "chunk_uploaded",
+                    [
+                        "file": fileURL.lastPathComponent,
+                        "bytes": size,
+                        "chunk_index": chunkIndex,
+                        "start_offset_ms": Int(startOffsetMs.rounded()),
+                        "end_offset_ms": Int(endOffsetMs.rounded()),
+                        "rms": stats.rms,
+                        "peak": stats.peak,
+                        "duration_seconds": stats.durationSeconds
+                    ]
+                )
             }
         } catch {
             emit("upload_error", ["message": error.localizedDescription])
         }
     }
 
-    private func multipartBody(fileURL: URL) throws -> (data: Data, contentType: String) {
+    private func multipartBody(
+        fileURL: URL,
+        chunkIndex: Int,
+        startOffsetMs: Double,
+        endOffsetMs: Double,
+        stats: AudioStats
+    ) throws -> (data: Data, contentType: String) {
         let boundary = "recall-\(UUID().uuidString)"
         var data = Data()
 
@@ -118,8 +172,36 @@ final class ChunkUploader {
         append("\(sessionID)\r\n")
 
         append("--\(boundary)\r\n")
-        append("Content-Disposition: form-data; name=\"source\"\r\n\r\n")
-        append("system\r\n")
+        append("Content-Disposition: form-data; name=\"chunk_index\"\r\n\r\n")
+        append("\(chunkIndex)\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"start_offset_ms\"\r\n\r\n")
+        append("\(Int(startOffsetMs.rounded()))\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"end_offset_ms\"\r\n\r\n")
+        append("\(Int(endOffsetMs.rounded()))\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"client_created_at_ms\"\r\n\r\n")
+        append("\(Int(nowMilliseconds().rounded()))\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"rms\"\r\n\r\n")
+        append("\(stats.rms)\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"peak\"\r\n\r\n")
+        append("\(stats.peak)\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"duration_seconds\"\r\n\r\n")
+        append("\(stats.durationSeconds)\r\n")
+
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"silent\"\r\n\r\n")
+        append("\(stats.isSilent ? "true" : "false")\r\n")
 
         append("--\(boundary)\r\n")
         append("Content-Disposition: form-data; name=\"audio\"; filename=\"\(fileURL.lastPathComponent)\"\r\n")
@@ -135,6 +217,7 @@ final class ChunkUploader {
 final class RotatingAudioWriter {
     private let chunkSeconds: Double
     private let uploader: ChunkUploader
+    private let recordingStartedAtMs: Double
     private let workDirectory: URL
     private let finishGroup = DispatchGroup()
 
@@ -142,11 +225,14 @@ final class RotatingAudioWriter {
     private var input: AVAssetWriterInput?
     private var startedAt: CMTime?
     private var outputURL: URL?
+    private var outputChunkIndex: Int?
+    private var outputStartOffsetMs: Double?
     private var chunkIndex = 0
 
-    init(chunkSeconds: Double, uploader: ChunkUploader) {
+    init(chunkSeconds: Double, uploader: ChunkUploader, recordingStartedAtMs: Double) {
         self.chunkSeconds = chunkSeconds
         self.uploader = uploader
+        self.recordingStartedAtMs = recordingStartedAtMs
         self.workDirectory = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("recall-macos-capture-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: workDirectory, withIntermediateDirectories: true)
     }
@@ -183,7 +269,8 @@ final class RotatingAudioWriter {
     }
 
     private func startWriter(at presentationTime: CMTime) throws {
-        let url = workDirectory.appendingPathComponent("system-\(chunkIndex).m4a")
+        let activeChunkIndex = chunkIndex
+        let url = workDirectory.appendingPathComponent("system-\(activeChunkIndex).m4a")
         chunkIndex += 1
 
         let writer = try AVAssetWriter(outputURL: url, fileType: .m4a)
@@ -212,23 +299,53 @@ final class RotatingAudioWriter {
         self.input = audioInput
         self.startedAt = presentationTime
         self.outputURL = url
+        self.outputChunkIndex = activeChunkIndex
+        self.outputStartOffsetMs = max(0, nowMilliseconds() - recordingStartedAtMs)
     }
 
     private func finishCurrentWriter() {
         guard let writer, let input, let outputURL else {
             return
         }
+        let chunkIndex = outputChunkIndex ?? 0
+        let startOffsetMs = outputStartOffsetMs ?? max(0, nowMilliseconds() - recordingStartedAtMs)
+        let endOffsetMs = max(startOffsetMs, nowMilliseconds() - recordingStartedAtMs)
 
         self.writer = nil
         self.input = nil
         self.startedAt = nil
         self.outputURL = nil
+        self.outputChunkIndex = nil
+        self.outputStartOffsetMs = nil
 
         finishGroup.enter()
         input.markAsFinished()
         writer.finishWriting { [uploader, finishGroup] in
             if writer.status == .completed {
-                uploader.upload(fileURL: outputURL)
+                let stats = calculateAudioStats(fileURL: outputURL)
+                if stats.isSilent {
+                    emit(
+                        "chunk_skipped",
+                        [
+                            "file": outputURL.lastPathComponent,
+                            "chunk_index": chunkIndex,
+                            "start_offset_ms": Int(startOffsetMs.rounded()),
+                            "end_offset_ms": Int(endOffsetMs.rounded()),
+                            "reason": "silent_system_audio",
+                            "rms": stats.rms,
+                            "peak": stats.peak,
+                            "duration_seconds": stats.durationSeconds
+                        ]
+                    )
+                } else {
+                    uploader.upload(
+                        fileURL: outputURL,
+                        chunkIndex: chunkIndex,
+                        startOffsetMs: startOffsetMs,
+                        endOffsetMs: endOffsetMs,
+                        stats: stats
+                    )
+                }
             } else if let error = writer.error {
                 emit("writer_error", ["message": error.localizedDescription])
             }
@@ -238,12 +355,83 @@ final class RotatingAudioWriter {
     }
 }
 
+func calculateAudioStats(fileURL: URL) -> AudioStats {
+    let asset = AVURLAsset(url: fileURL)
+    guard let track = asset.tracks(withMediaType: .audio).first,
+          let reader = try? AVAssetReader(asset: asset) else {
+        return AudioStats(rms: 0, peak: 0, durationSeconds: 0, sampleCount: 0)
+    }
+
+    let output = AVAssetReaderTrackOutput(
+        track: track,
+        outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+    )
+    output.alwaysCopiesSampleData = false
+
+    guard reader.canAdd(output) else {
+        return AudioStats(rms: 0, peak: 0, durationSeconds: CMTimeGetSeconds(asset.duration), sampleCount: 0)
+    }
+
+    reader.add(output)
+    guard reader.startReading() else {
+        return AudioStats(rms: 0, peak: 0, durationSeconds: CMTimeGetSeconds(asset.duration), sampleCount: 0)
+    }
+
+    var sumSquares = 0.0
+    var peak = 0.0
+    var sampleCount = 0
+
+    while let sampleBuffer = output.copyNextSampleBuffer() {
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            continue
+        }
+
+        var totalLength = 0
+        var dataPointer: UnsafeMutablePointer<Int8>?
+        let status = CMBlockBufferGetDataPointer(
+            blockBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: nil,
+            totalLengthOut: &totalLength,
+            dataPointerOut: &dataPointer
+        )
+        guard status == kCMBlockBufferNoErr, let dataPointer else {
+            continue
+        }
+
+        let floatCount = totalLength / MemoryLayout<Float>.size
+        dataPointer.withMemoryRebound(to: Float.self, capacity: floatCount) { samples in
+            for index in 0..<floatCount {
+                let value = Double(samples[index])
+                sumSquares += value * value
+                peak = max(peak, abs(value))
+            }
+        }
+        sampleCount += floatCount
+    }
+
+    let rms = sampleCount > 0 ? sqrt(sumSquares / Double(sampleCount)) : 0
+    let durationSeconds = max(0, CMTimeGetSeconds(asset.duration))
+    return AudioStats(rms: rms, peak: peak, durationSeconds: durationSeconds, sampleCount: sampleCount)
+}
+
 final class ScreenAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let arguments: CaptureArguments
     private let queue = DispatchQueue(label: "recall.macos.capture.audio")
     private let uploader: ChunkUploader
-    private lazy var audioWriter = RotatingAudioWriter(chunkSeconds: arguments.chunkSeconds, uploader: uploader)
+    private lazy var audioWriter = RotatingAudioWriter(
+        chunkSeconds: arguments.chunkSeconds,
+        uploader: uploader,
+        recordingStartedAtMs: arguments.recordingStartedAtMs
+    )
     private var stream: SCStream?
+    private var audioBuffersReceived = 0
 
     init(arguments: CaptureArguments) {
         self.arguments = arguments
@@ -292,6 +480,10 @@ final class ScreenAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .audio else {
             return
+        }
+        audioBuffersReceived += 1
+        if audioBuffersReceived == 1 || audioBuffersReceived % 50 == 0 {
+            emit("audio_buffer", ["buffers": audioBuffersReceived])
         }
         audioWriter.append(sampleBuffer)
     }

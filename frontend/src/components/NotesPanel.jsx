@@ -1,10 +1,42 @@
-import { ArrowRight, ClipboardList, Code2, Lightbulb, ListChecks, Users } from "lucide-react";
+import { ArrowRight, BarChart3, ClipboardList, Code2, Lightbulb, ListChecks, Users } from "lucide-react";
+import {
+  ChartSection,
+  createMissingGraphCard,
+  getGraphCodeSnippets,
+  getNonGraphCodeSnippets,
+  getStructuredChartCards,
+} from "./ChartCard.jsx";
 import { CodeBlock } from "./CodeBlock.jsx";
 
 export function NotesPanel({ meeting }) {
   const notes = meeting?.notes_json;
+  const liveMemory = notes?.live_memory;
+  const liveInsights = notes?.live_insights;
   const diagnostics = notes?.capture_diagnostics;
-  const hasAnalysis = Boolean(notes?.summary || notes?.participants?.length || notes?.action_items?.length || notes?.error);
+  const chartCards = getStructuredChartCards(notes);
+  const graphCodeSnippets = getGraphCodeSnippets(notes);
+  const codeSnippets = getNonGraphCodeSnippets(notes);
+  const graphFallbackCards = !chartCards.length && graphCodeSnippets.length ? [createMissingGraphCard()] : [];
+  const visibleChartCards = chartCards.length ? chartCards : graphFallbackCards;
+  const hasAnalysis = Boolean(
+    notes?.summary ||
+      notes?.participants?.length ||
+      notes?.action_items?.length ||
+      notes?.error ||
+      codeSnippets.length ||
+      graphCodeSnippets.length
+  );
+  const hasLiveMemory = Boolean(
+    liveMemory?.summary ||
+      liveMemory?.questions?.length ||
+      liveMemory?.actions?.length ||
+      liveInsights?.live_summary ||
+      liveInsights?.questions?.length ||
+      liveInsights?.risks?.length ||
+      liveInsights?.action_items?.length ||
+      liveInsights?.suggested_answers?.length ||
+      chartCards.length
+  );
 
   return (
     <section className="pane notes-pane">
@@ -16,7 +48,14 @@ export function NotesPanel({ meeting }) {
         {notes?.sentiment ? <span className="sentiment">{notes.sentiment}</span> : null}
       </div>
 
-      {!hasAnalysis ? (
+      {!hasAnalysis && hasLiveMemory ? (
+        <LiveMemoryNotes
+          memory={liveMemory || {}}
+          insights={liveInsights || {}}
+          chartCards={chartCards}
+          diagnostics={diagnostics}
+        />
+      ) : !hasAnalysis ? (
         <>
           <div className="empty-state">No notes yet.</div>
           {diagnostics ? <CaptureDiagnostics diagnostics={diagnostics} /> : null}
@@ -28,10 +67,12 @@ export function NotesPanel({ meeting }) {
         </>
       ) : (
         <div className="notes-content">
-          <section className="note-section">
-            <h3>Summary</h3>
-            <p>{notes.summary}</p>
-          </section>
+          {notes.summary ? (
+            <section className="note-section">
+              <h3>Summary</h3>
+              <p>{notes.summary}</p>
+            </section>
+          ) : null}
 
           {notes.insights?.length ? (
             <section className="note-section">
@@ -47,47 +88,63 @@ export function NotesPanel({ meeting }) {
             </section>
           ) : null}
 
-          <section className="note-section">
-            <h3>
-              <Users size={16} />
-              Participants
-            </h3>
-            <div className="tag-row">
-              {(notes.participants || []).map((participant) => (
-                <span className="tag" key={participant}>
-                  {participant}
-                </span>
-              ))}
-            </div>
-          </section>
+          {visibleChartCards.length ? (
+            <section className="note-section">
+              <h3>
+                <BarChart3 size={16} />
+                Charts
+              </h3>
+              <ChartSection cards={visibleChartCards} />
+            </section>
+          ) : null}
 
-          <section className="note-section">
-            <h3>
-              <ListChecks size={16} />
-              Decisions
-            </h3>
-            <ul className="clean-list">
-              {(notes.key_decisions || []).map((decision) => (
-                <li key={decision}>{decision}</li>
-              ))}
-            </ul>
-          </section>
+          {notes.participants?.length ? (
+            <section className="note-section">
+              <h3>
+                <Users size={16} />
+                Participants
+              </h3>
+              <div className="tag-row">
+                {notes.participants.map((participant) => (
+                  <span className="tag" key={participant}>
+                    {participant}
+                  </span>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
-          <section className="note-section">
-            <h3>Actions</h3>
-            <div className="action-table">
-              <div className="action-head">Owner</div>
-              <div className="action-head">Task</div>
-              <div className="action-head">Due</div>
-              {(notes.action_items || []).map((item, index) => (
-                <div className="action-row" key={`${item.owner}-${index}`}>
-                  <span>{item.owner || "TBD"}</span>
-                  <span>{item.task}</span>
-                  <span>{item.due || "TBD"}</span>
-                </div>
-              ))}
-            </div>
-          </section>
+          {notes.key_decisions?.length ? (
+            <section className="note-section">
+              <h3>
+                <ListChecks size={16} />
+                Decisions
+              </h3>
+              <ul className="clean-list">
+                {notes.key_decisions.map((decision) => (
+                  <li key={decision}>{decision}</li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {notes.action_items?.length ? (
+            <section className="note-section">
+              <h3>Actions</h3>
+              <div className="action-table">
+                <div className="action-head">Owner</div>
+                <div className="action-head">Task</div>
+                <div className="action-head">Due</div>
+                {notes.action_items.map((item, index) => (
+                  <div className="action-row" key={`${item.owner}-${index}`}>
+                    <span>{item.owner || "TBD"}</span>
+                    <span>{item.task}</span>
+                    <span>{item.due || "TBD"}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
 
           {notes.next_steps?.length ? (
             <section className="note-section">
@@ -107,13 +164,13 @@ export function NotesPanel({ meeting }) {
             </section>
           ) : null}
 
-          {notes.code_snippets?.length ? (
+          {codeSnippets.length ? (
             <section className="note-section">
               <h3>
                 <Code2 size={16} />
                 Code
               </h3>
-              {notes.code_snippets.map((snippet, index) => (
+              {codeSnippets.map((snippet, index) => (
                 <CodeBlock
                   key={`${snippet.language}-${index}`}
                   language={snippet.language}
@@ -127,6 +184,86 @@ export function NotesPanel({ meeting }) {
         </div>
       )}
     </section>
+  );
+}
+
+function LiveMemoryNotes({ memory, insights, chartCards = [], diagnostics }) {
+  const actions = insights.action_items?.length ? insights.action_items : memory.actions || [];
+
+  return (
+    <div className="notes-content">
+      {insights.live_summary || memory.summary ? (
+        <section className="note-section">
+          <h3>Live summary</h3>
+          <p>{insights.live_summary || memory.summary}</p>
+        </section>
+      ) : null}
+
+      {chartCards.length ? (
+        <section className="note-section">
+          <h3>Charts</h3>
+          <ChartSection cards={chartCards} />
+        </section>
+      ) : null}
+
+      {(insights.questions?.length || memory.questions?.length) ? (
+        <section className="note-section">
+          <h3>Questions</h3>
+          <ul className="clean-list">
+            {(insights.questions?.length ? insights.questions : memory.questions || []).map((question, index) => (
+              <li key={`${typeof question === "string" ? question : question.start}-${index}`}>
+                {typeof question === "string" ? question : question.text}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {insights.risks?.length ? (
+        <section className="note-section">
+          <h3>Risks</h3>
+          <ul className="clean-list">
+            {insights.risks.map((risk, index) => (
+              <li key={`${risk}-${index}`}>{risk}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {actions.length ? (
+        <section className="note-section">
+          <h3>Actions</h3>
+          <div className="action-table">
+            <div className="action-head">Owner</div>
+            <div className="action-head">Task</div>
+            <div className="action-head">Due</div>
+            {actions.map((item, index) => (
+              <div className="action-row" key={`${item.start}-${index}`}>
+                <span>{item.owner || "TBD"}</span>
+                <span>{item.task || item.text}</span>
+                <span>{item.due || "TBD"}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {insights.suggested_answers?.length ? (
+        <section className="note-section">
+          <h3>Suggested answers</h3>
+          <div className="next-step-list">
+            {insights.suggested_answers.map((item, index) => (
+              <div className="next-step" key={`${item.question}-${index}`}>
+                <strong>{item.question}</strong>
+                <p>{item.answer}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {diagnostics ? <CaptureDiagnostics diagnostics={diagnostics} /> : null}
+    </div>
   );
 }
 

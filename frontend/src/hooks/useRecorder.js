@@ -119,6 +119,7 @@ export function useRecorder({
   onProcessingStarted,
   getAudioStream = getMicrophoneStream,
   getStartPayload,
+  startSystemAudioCapture,
   startTimeoutMs = START_TIMEOUT_MS,
 }) {
   const [status, setStatus] = useState("idle");
@@ -127,13 +128,19 @@ export function useRecorder({
   const [error, setError] = useState("");
   const [audioLevel, setAudioLevel] = useState(0);
   const [audioWarning, setAudioWarning] = useState("");
+  const [systemAudioWarning, setSystemAudioWarning] = useState("");
   const mediaRecorderRef = useRef(null);
   const streamRef = useRef(null);
   const audioMonitorRef = useRef(null);
   const audioDiagnosticsRef = useRef(null);
+  const systemCaptureRef = useRef(null);
+  const systemCaptureStartPromiseRef = useRef(null);
+  const systemCaptureDiagnosticsRef = useRef(null);
   const startedAtRef = useRef(null);
   const uploadPromisesRef = useRef([]);
   const startAttemptRef = useRef(0);
+  const micChunkIndexRef = useRef(0);
+  const lastMicChunkOffsetMsRef = useRef(0);
 
   useEffect(() => {
     if (status !== "recording") {
@@ -146,12 +153,17 @@ export function useRecorder({
   }, [status]);
 
   const uploadChunk = useCallback(
-    async (activeSessionId, blob) => {
+    async (activeSessionId, blob, timing = {}) => {
       if (!blob.size) {
         return;
       }
       const formData = new FormData();
       formData.append("session_id", activeSessionId);
+      for (const [key, value] of Object.entries(timing)) {
+        if (value !== undefined && value !== null) {
+          formData.append(key, String(value));
+        }
+      }
       formData.append("audio", blob, `chunk-${Date.now()}.webm`);
       const upload = fetchWithTimeout(
         `${apiBaseUrl}/api/recording/chunk`,
@@ -181,13 +193,21 @@ export function useRecorder({
     audioMonitorRef.current?.stop?.();
     audioMonitorRef.current = null;
     audioDiagnosticsRef.current = null;
+    systemCaptureRef.current?.stop?.()?.catch?.(() => {});
+    systemCaptureRef.current = null;
+    systemCaptureStartPromiseRef.current?.then((capture) => capture?.stop?.()?.catch?.(() => {})).catch(() => {});
+    systemCaptureStartPromiseRef.current = null;
+    systemCaptureDiagnosticsRef.current = null;
     mediaRecorderRef.current = null;
     streamRef.current = null;
     startedAtRef.current = null;
     uploadPromisesRef.current = [];
+    micChunkIndexRef.current = 0;
+    lastMicChunkOffsetMsRef.current = 0;
     setElapsedSeconds(0);
     setAudioLevel(0);
     setAudioWarning("");
+    setSystemAudioWarning("");
     setSessionId(null);
     setStatus("idle");
   }, []);
@@ -198,8 +218,10 @@ export function useRecorder({
     setError("");
     setAudioLevel(0);
     setAudioWarning("");
+    setSystemAudioWarning("");
     setStatus("starting");
     let stream = null;
+    let systemCapture = null;
     let startSettled = false;
 
     try {
@@ -252,32 +274,75 @@ export function useRecorder({
       });
 
       recorder.ondataavailable = (event) => {
-        uploadChunk(data.session_id, event.data).catch((chunkError) => {
+        const now = Date.now();
+        const recordingStartedAt = startedAtRef.current || now;
+        const endOffsetMs = Math.max(0, now - recordingStartedAt);
+        const startOffsetMs = Math.min(lastMicChunkOffsetMsRef.current || 0, endOffsetMs);
+        const chunkIndex = micChunkIndexRef.current;
+        micChunkIndexRef.current += 1;
+        lastMicChunkOffsetMsRef.current = endOffsetMs;
+
+        uploadChunk(data.session_id, event.data, {
+          chunk_index: chunkIndex,
+          start_offset_ms: startOffsetMs,
+          end_offset_ms: endOffsetMs,
+          client_created_at_ms: now,
+        }).catch((chunkError) => {
           setError(chunkError.message);
         });
       };
 
       streamRef.current = stream;
       audioMonitorRef.current = audioMonitor;
+      systemCaptureRef.current = systemCapture;
       mediaRecorderRef.current = recorder;
       startedAtRef.current = Date.now();
+      micChunkIndexRef.current = 0;
+      lastMicChunkOffsetMsRef.current = 0;
       uploadPromisesRef.current = [];
       setElapsedSeconds(0);
       setSessionId(data.session_id);
       setStatus("recording");
       onSessionStarted?.(data.session_id);
       recorder.start(6000);
+
+      if (startSystemAudioCapture) {
+        const recordingStartedAtMs = startedAtRef.current;
+        const systemCapturePromise = startSystemAudioCapture(data.session_id, { recordingStartedAtMs })
+          .then((nextSystemCapture) => {
+            if (attemptId !== startAttemptRef.current) {
+              nextSystemCapture?.stop?.()?.catch?.(() => {});
+              return null;
+            }
+            systemCaptureRef.current = nextSystemCapture;
+            systemCaptureDiagnosticsRef.current = nextSystemCapture?.diagnostics || null;
+            if (nextSystemCapture?.warning) {
+              setSystemAudioWarning(nextSystemCapture.warning);
+            }
+            return nextSystemCapture;
+          })
+          .catch((systemError) => {
+            if (attemptId === startAttemptRef.current) {
+              setSystemAudioWarning(`${systemError.message} Continuing with microphone only.`);
+            }
+            return null;
+          });
+        systemCaptureStartPromiseRef.current = systemCapturePromise;
+      }
     } catch (recordingError) {
       stopStream(stream);
       audioMonitorRef.current?.stop?.();
       audioMonitorRef.current = null;
+      systemCapture?.stop?.()?.catch?.(() => {});
+      systemCaptureStartPromiseRef.current?.then((capture) => capture?.stop?.()?.catch?.(() => {})).catch(() => {});
+      systemCaptureStartPromiseRef.current = null;
       if (attemptId !== startAttemptRef.current) {
         return;
       }
       setStatus("idle");
       setError(recordingError.message);
     }
-  }, [apiBaseUrl, getAudioStream, getStartPayload, onSessionStarted, startTimeoutMs, uploadChunk]);
+  }, [apiBaseUrl, getAudioStream, getStartPayload, onSessionStarted, startSystemAudioCapture, startTimeoutMs, uploadChunk]);
 
   const stop = useCallback(async () => {
     if (!sessionId || !mediaRecorderRef.current) {
@@ -306,15 +371,37 @@ export function useRecorder({
     const audioDiagnostics = audioDiagnosticsRef.current || audioMonitorRef.current?.getDiagnostics?.() || null;
     await audioMonitorRef.current?.stop?.();
     audioMonitorRef.current = null;
+    const systemCapture = systemCaptureRef.current;
+    if (systemCaptureStartPromiseRef.current) {
+      await systemCaptureStartPromiseRef.current.catch(() => null);
+    }
+    const activeSystemCapture = systemCaptureRef.current || systemCapture;
+    systemCaptureRef.current = null;
+    systemCaptureStartPromiseRef.current = null;
+    let systemStopDiagnostics = null;
+    if (activeSystemCapture?.stop) {
+      try {
+        const stopResult = await activeSystemCapture.stop();
+        systemStopDiagnostics = stopResult?.diagnostics || null;
+      } catch (systemError) {
+        setSystemAudioWarning(`${systemError.message} Microphone recording is still being processed.`);
+      }
+    }
     await Promise.allSettled(uploadPromisesRef.current);
 
     try {
+      const captureDiagnostics = {
+        ...(audioDiagnostics || {}),
+        ...(systemCaptureDiagnosticsRef.current || {}),
+        ...(systemStopDiagnostics || {}),
+      };
+      systemCaptureDiagnosticsRef.current = null;
       await fetchWithTimeout(
         `${apiBaseUrl}/api/recording/stop`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: sessionId, duration_seconds: duration, capture_diagnostics: audioDiagnostics }),
+          body: JSON.stringify({ session_id: sessionId, duration_seconds: duration, capture_diagnostics: captureDiagnostics }),
         },
         startTimeoutMs,
         "Stop recording"
@@ -334,6 +421,7 @@ export function useRecorder({
     error,
     audioLevel,
     audioWarning,
+    systemAudioWarning,
     start,
     stop,
     cancel,

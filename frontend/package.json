@@ -6,7 +6,7 @@
   "main": "electron/main.js",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "electron": "concurrently -k \"npm run dev\" \"wait-on http://127.0.0.1:5173 && electron .\"",
+    "electron": "concurrently -k \"npm run dev\" \"wait-on http://127.0.0.1:5173 && env -u ELECTRON_RUN_AS_NODE electron .\"",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1"
   },

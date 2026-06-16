@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
-from typing import Union
+from typing import Any, Union
 
 from openai import OpenAI
 
@@ -22,6 +22,66 @@ def transcribe(audio_path: Union[str, Path]) -> str:
             file=audio_file,
         )
     return result.text
+
+
+def transcribe_verbose(audio_path: Union[str, Path]) -> dict[str, Any]:
+    settings = get_settings()
+    client = OpenAI(api_key=settings.openai_api_key)
+    prepared_path = _prepare_audio_path(Path(audio_path))
+    with prepared_path.open("rb") as audio_file:
+        try:
+            result = client.audio.transcriptions.create(
+                model=settings.openai_transcription_model,
+                file=audio_file,
+                response_format="verbose_json",
+                timestamp_granularities=["segment"],
+            )
+        except TypeError:
+            audio_file.seek(0)
+            result = client.audio.transcriptions.create(
+                model=settings.openai_transcription_model,
+                file=audio_file,
+                response_format="verbose_json",
+            )
+
+    text = _result_value(result, "text") or ""
+    segments = []
+    for segment in _result_value(result, "segments") or []:
+        start = _segment_value(segment, "start")
+        end = _segment_value(segment, "end")
+        segment_text = (_segment_value(segment, "text") or "").strip()
+        if segment_text:
+            segments.append(
+                {
+                    "start": _safe_float(start, 0.0),
+                    "end": _safe_float(end, _safe_float(start, 0.0)),
+                    "text": segment_text,
+                }
+            )
+
+    if not segments and text.strip():
+        segments.append({"start": 0.0, "end": 0.0, "text": text.strip()})
+
+    return {"text": text.strip(), "segments": segments}
+
+
+def _result_value(result: Any, key: str) -> Any:
+    if isinstance(result, dict):
+        return result.get(key)
+    return getattr(result, key, None)
+
+
+def _segment_value(segment: Any, key: str) -> Any:
+    if isinstance(segment, dict):
+        return segment.get(key)
+    return getattr(segment, key, None)
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _prepare_audio_path(audio_path: Path) -> Path:

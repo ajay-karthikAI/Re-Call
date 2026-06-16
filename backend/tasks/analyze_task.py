@@ -26,14 +26,23 @@ async def _analyze_meeting(session_id: UUID) -> str:
             raise ValueError(f"Meeting {session_id} has no transcript to analyze")
 
         existing_notes = meeting.notes_json if isinstance(meeting.notes_json, dict) else {}
-        capture_diagnostics = existing_notes.get("capture_diagnostics")
+        preserved_live_notes = {
+            key: existing_notes[key]
+            for key in (
+                "capture_diagnostics",
+                "live_transcript",
+                "live_memory",
+                "live_insights",
+                "live_insights_error",
+            )
+            if key in existing_notes
+        }
         notes = await asyncio.to_thread(
             analyze_transcript,
             meeting.transcript,
             meeting.duration_seconds,
         )
-        if capture_diagnostics:
-            notes["capture_diagnostics"] = capture_diagnostics
+        notes.update(preserved_live_notes)
         meeting.notes_json = notes
         meeting.title = notes.get("title") or meeting.title
         meeting.is_technical = bool(notes.get("is_technical"))
