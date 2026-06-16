@@ -9,12 +9,12 @@ function formatDate(value) {
   }).format(new Date(value));
 }
 
-export function MeetingHistory({ meetings, selectedId, onSelect, onDelete, onLoadMore, hasMore = false, loading = false }) {
+export function MeetingHistory({ title = "History", meetings, selectedId, onSelect, onDelete, onLoadMore, hasMore = false, loading = false }) {
   return (
     <section className="sidebar-section history-section">
       <div className="sidebar-heading">
         <History size={16} />
-        <h2>History</h2>
+        <h2>{title}</h2>
       </div>
       <div className="history-list">
         {meetings.length ? (
@@ -45,7 +45,7 @@ export function MeetingHistory({ meetings, selectedId, onSelect, onDelete, onLoa
             {hasMore ? (
               <button className="history-load-more" onClick={onLoadMore} disabled={loading}>
                 {loading ? <LoaderCircle size={14} className="spin" /> : null}
-                <span>{loading ? "Loading" : "Load more"}</span>
+                <span>{loading ? "Loading" : "View More"}</span>
               </button>
             ) : null}
           </>

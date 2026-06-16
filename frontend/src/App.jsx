@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { CalendarDays, CheckSquare2, Clock3, Home, Users } from "lucide-react";
 import { ExportButton } from "./components/ExportButton.jsx";
 import { HomeScreen } from "./components/HomeScreen.jsx";
 import { LiveInsightsPanel } from "./components/LiveInsightsPanel.jsx";
 import { MeetingHistory } from "./components/MeetingHistory.jsx";
-import { NotesPanel } from "./components/NotesPanel.jsx";
 import { RecordingBar } from "./components/RecordingBar.jsx";
 import { SearchBar } from "./components/SearchBar.jsx";
 import { TranscriptImportPanel } from "./components/TranscriptImportPanel.jsx";
@@ -13,12 +13,124 @@ import { useWebSocket } from "./hooks/useWebSocket.js";
 
 const FALLBACK_API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 const HISTORY_PAGE_SIZE = 30;
+const THEME_STORAGE_KEY = "recall-theme";
+const DASHBOARD_TABS = [
+  { id: "summary", label: "Summary" },
+  { id: "transcript", label: "Transcript" },
+  { id: "insights", label: "Live Insights" },
+];
 
 function apiErrorMessage(error) {
   if (error instanceof TypeError && /fetch/i.test(error.message || "")) {
     return "Backend is starting. Retrying...";
   }
   return error?.message || "Backend is not ready";
+}
+
+function formatMeetingDate(value) {
+  if (!value) {
+    return "No date";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function formatDuration(totalSeconds = 0) {
+  const safeSeconds = Math.max(0, Math.floor(totalSeconds || 0));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const seconds = safeSeconds % 60;
+
+  if (hours) {
+    return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+  }
+
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+function getSpeakerLabel(meeting) {
+  const participants = meeting?.notes_json?.participants || [];
+  if (participants.length) {
+    return `${participants.length} speaker${participants.length === 1 ? "" : "s"}`;
+  }
+  return "Speakers pending";
+}
+
+function textFromItem(item) {
+  if (typeof item === "string") {
+    return item;
+  }
+  return item?.text || item?.question || item?.task || item?.title || "";
+}
+
+function textList(items = []) {
+  return items.map(textFromItem).map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function getNextSteps(meeting) {
+  const notes = meeting?.notes_json || {};
+  const liveActions = notes.live_insights?.action_items?.length
+    ? notes.live_insights.action_items
+    : notes.live_memory?.actions || [];
+
+  const nextSteps = (notes.next_steps || []).map((step) => ({
+    priority: typeof step === "string" ? "next" : step.priority || "next",
+    task: textFromItem(step) || "Follow up",
+    detail: typeof step === "string" ? "" : step.reason || "",
+  }));
+
+  const actionItems = (notes.action_items || liveActions || []).map((item) => ({
+    priority: typeof item === "string" ? "next" : item.priority || "next",
+    task: textFromItem(item) || "Follow up",
+    detail: typeof item === "string" ? "" : [item.owner, item.due].filter(Boolean).join(" / "),
+  }));
+
+  return [...nextSteps, ...actionItems].filter((step) => step.task).slice(0, 8);
+}
+
+function normalizePriority(priority = "") {
+  const value = String(priority).toLowerCase();
+  if (value.includes("high")) return "high";
+  if (value.includes("med")) return "medium";
+  if (value.includes("low")) return "low";
+  return "next";
+}
+
+function getTitleSizeClass(title = "") {
+  if (title.length > 96) return "meeting-title-compact";
+  if (title.length > 56) return "meeting-title-long";
+  return "";
+}
+
+function getInitialThemeMode() {
+  if (typeof window === "undefined") {
+    return "dark";
+  }
+  const domTheme = document.documentElement.dataset.theme;
+  if (domTheme === "light" || domTheme === "dark") {
+    return domTheme;
+  }
+
+  try {
+    const storedTheme = window.localStorage?.getItem(THEME_STORAGE_KEY);
+    return storedTheme === "light" ? "light" : "dark";
+  } catch {
+    return "dark";
+  }
+}
+
+function storeThemeMode(themeMode) {
+  try {
+    window.localStorage?.setItem(THEME_STORAGE_KEY, themeMode);
+  } catch {
+    // Theme persistence is best-effort; the visible theme should still change.
+  }
 }
 
 export default function App() {
@@ -32,10 +144,36 @@ export default function App() {
   const [systemAudioStatus, setSystemAudioStatus] = useState({ enabled: false, available: false });
   const [hasMoreMeetings, setHasMoreMeetings] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [activeDashboardTab, setActiveDashboardTab] = useState("summary");
+  const [themeMode, setThemeMode] = useState(getInitialThemeMode);
+  const lastThemeToggleAtRef = useRef(0);
 
   useEffect(() => {
     window.recall?.getApiBaseUrl?.().then(setApiBaseUrl).catch(() => setApiBaseUrl(FALLBACK_API_BASE));
     window.recall?.systemAudioStatus?.().then(setSystemAudioStatus).catch(() => setSystemAudioStatus({ enabled: false, available: false }));
+  }, []);
+
+  useLayoutEffect(() => {
+    if (typeof document === "undefined") {
+      return;
+    }
+    document.documentElement.dataset.theme = themeMode;
+    storeThemeMode(themeMode);
+  }, [themeMode]);
+
+  const toggleThemeMode = useCallback(() => {
+    const now = Date.now();
+    if (now - lastThemeToggleAtRef.current < 500) {
+      return;
+    }
+    lastThemeToggleAtRef.current = now;
+
+    document.documentElement.classList.add("theme-change-lock");
+    window.setTimeout(() => {
+      document.documentElement.classList.remove("theme-change-lock");
+    }, 180);
+
+    setThemeMode((current) => (current === "light" ? "dark" : "light"));
   }, []);
 
   const loadMeetings = useCallback(async ({ append = false } = {}) => {
@@ -313,15 +451,17 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <span className="brand-mark">R:</span>
-          <div>
-            <h1>Re: Call</h1>
-            <span>Meeting memory</span>
-          </div>
+          <img className="brand-logo-image" src="/recall-logo.png" alt="Re: Call logo" />
+          <h1>Re: Call</h1>
         </div>
+        <button className="sidebar-home-button" onClick={() => setView("home")}>
+          <Home size={26} />
+          <span>Home</span>
+        </button>
         <SearchBar apiBaseUrl={apiBaseUrl} />
         <TranscriptImportPanel apiBaseUrl={apiBaseUrl} onImported={handleTranscriptImported} />
         <MeetingHistory
+          title="Recent Calls"
           meetings={meetings}
           selectedId={selectedId}
           onSelect={setSelectedId}
@@ -330,6 +470,11 @@ export default function App() {
           hasMore={hasMoreMeetings}
           loading={historyLoading}
         />
+        <div className="plan-card">
+          <span>You're on</span>
+          <strong>Basic Plan</strong>
+          <button type="button">Upgrade</button>
+        </div>
       </aside>
 
       <main className="workspace">
@@ -343,6 +488,8 @@ export default function App() {
           onStop={recorder.stop}
           onCancel={recorder.cancel}
           activeMeeting={selectedMeeting}
+          themeMode={themeMode}
+          onToggleTheme={toggleThemeMode}
           exportButton={
             <>
               {window.recall?.showOverlayWindow ? (
@@ -355,12 +502,184 @@ export default function App() {
           }
         />
 
-        <div className="content-grid">
-          <TranscriptPane meeting={selectedMeeting} />
-          <LiveInsightsPanel meeting={selectedMeeting} />
-          <NotesPanel meeting={selectedMeeting} />
+        <section className="dashboard-top">
+          <div className="dashboard-title-row">
+            <div className="dashboard-title-copy">
+              <h1 className={getTitleSizeClass(selectedMeeting?.title || "Call Title")}>
+                {selectedMeeting?.title || "Call Title"}
+              </h1>
+            </div>
+          </div>
+
+          <div className="call-meta-grid">
+            <div className="call-meta-item">
+              <CalendarDays size={16} />
+              <span>Date, time</span>
+              <strong>{formatMeetingDate(selectedMeeting?.created_at)}</strong>
+            </div>
+            <div className="call-meta-item">
+              <Clock3 size={16} />
+              <span>Call length</span>
+              <strong>{formatDuration(selectedMeeting?.duration_seconds || recorder.elapsedSeconds)}</strong>
+            </div>
+            <div className="call-meta-item">
+              <Users size={16} />
+              <span>Speakers</span>
+              <strong>{getSpeakerLabel(selectedMeeting)}</strong>
+            </div>
+          </div>
+        </section>
+
+        <div className="dashboard-body">
+          <section className="call-main-panel">
+            <div className="call-tabs" role="tablist" aria-label="Call information">
+              {DASHBOARD_TABS.map((tab) => (
+                <button
+                  key={tab.id}
+                  className={`call-tab ${activeDashboardTab === tab.id ? "selected" : ""}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={activeDashboardTab === tab.id}
+                  onClick={() => setActiveDashboardTab(tab.id)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="call-tab-panel" role="tabpanel">
+              {activeDashboardTab === "summary" ? (
+                <SummaryPane meeting={selectedMeeting} />
+              ) : activeDashboardTab === "transcript" ? (
+                <TranscriptPane meeting={selectedMeeting} />
+              ) : (
+                <LiveInsightsPanel meeting={selectedMeeting} />
+              )}
+            </div>
+          </section>
+
+          <NextStepsRail meeting={selectedMeeting} />
         </div>
       </main>
     </div>
+  );
+}
+
+function SummaryPane({ meeting }) {
+  const notes = meeting?.notes_json || {};
+  const liveSummary = notes.live_insights?.live_summary || notes.live_memory?.summary || "";
+  const summary = notes.summary || liveSummary;
+  const insights = textList(notes.insights?.length ? notes.insights : notes.live_insights?.risks || []);
+  const decisions = textList(notes.key_decisions || []);
+  const participants = notes.participants || [];
+
+  return (
+    <section className="pane summary-pane">
+      <div className="pane-header">
+        <div>
+          <CheckSquare2 size={18} />
+          <h2>Summary</h2>
+        </div>
+      </div>
+      <div className="notes-content">
+        {summary ? (
+          <section className="note-section summary-lead">
+            <h3>Overview</h3>
+            <p>{summary}</p>
+          </section>
+        ) : (
+          <div className="empty-state">No summary yet.</div>
+        )}
+
+        {insights.length ? (
+          <section className="note-section">
+            <h3>Key insights</h3>
+            <ul className="clean-list">
+              {insights.map((insight, index) => (
+                <li key={`${insight}-${index}`}>{insight}</li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+
+        {decisions.length ? (
+          <section className="note-section">
+            <h3>Decisions</h3>
+            <ul className="clean-list">
+              {decisions.map((decision, index) => (
+                <li key={`${decision}-${index}`}>{decision}</li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+
+        {participants.length ? (
+          <section className="note-section">
+            <h3>Speakers</h3>
+            <div className="tag-row">
+              {participants.map((participant) => (
+                <span className="tag" key={participant}>
+                  {participant}
+                </span>
+              ))}
+            </div>
+          </section>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function NextStepsRail({ meeting }) {
+  const steps = getNextSteps(meeting);
+  const [completedStepsByMeeting, setCompletedStepsByMeeting] = useState({});
+  const meetingKey = meeting?.id || "empty";
+  const completedSteps = completedStepsByMeeting[meetingKey] || {};
+
+  function toggleStep(stepKey) {
+    setCompletedStepsByMeeting((current) => ({
+      ...current,
+      [meetingKey]: {
+        ...(current[meetingKey] || {}),
+        [stepKey]: !(current[meetingKey] || {})[stepKey],
+      },
+    }));
+  }
+
+  return (
+    <aside className="next-steps-rail">
+      <div className="next-steps-heading">
+        <CheckSquare2 size={18} />
+        <h2>Next Steps</h2>
+      </div>
+
+      {steps.length ? (
+        <div className="dashboard-next-step-list">
+          {steps.map((step, index) => {
+            const priority = normalizePriority(step.priority);
+            const stepKey = `${step.task}-${index}`;
+            const isComplete = Boolean(completedSteps[stepKey]);
+            return (
+              <div className={`dashboard-next-step ${isComplete ? "is-complete" : ""}`} key={stepKey}>
+                <button
+                  className="task-checkbox"
+                  type="button"
+                  aria-label={`${isComplete ? "Unmark" : "Mark"} ${step.task} as complete`}
+                  aria-pressed={isComplete}
+                  onClick={() => toggleStep(stepKey)}
+                />
+                <div>
+                  <span className={`task-priority priority-${priority}`}>{priority}</span>
+                  <strong>{step.task}</strong>
+                  {step.detail ? <p>{step.detail}</p> : null}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-state compact">No next steps yet.</div>
+      )}
+    </aside>
   );
 }

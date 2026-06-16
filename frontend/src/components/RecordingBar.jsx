@@ -1,4 +1,4 @@
-import { LoaderCircle, Mic, Square, X } from "lucide-react";
+import { LoaderCircle, Mic, Moon, Square, Sun, X } from "lucide-react";
 
 function formatTime(totalSeconds) {
   const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
@@ -6,11 +6,25 @@ function formatTime(totalSeconds) {
   return `${minutes}:${seconds}`;
 }
 
-export function RecordingBar({ status, elapsedSeconds, error, audioLevel = 0, audioWarning = "", onStart, onStop, onCancel, activeMeeting, exportButton }) {
+export function RecordingBar({
+  status,
+  elapsedSeconds,
+  error,
+  audioLevel = 0,
+  audioWarning = "",
+  onStart,
+  onStop,
+  onCancel,
+  activeMeeting,
+  exportButton,
+  themeMode = "dark",
+  onToggleTheme,
+}) {
   const isRecording = status === "recording";
   const isStarting = status === "starting";
   const isBusy = ["starting", "stopping"].includes(status);
   const meterLevel = Math.min(1, audioLevel * 18);
+  const isLightMode = themeMode === "light";
 
   return (
     <header className="recording-bar">
@@ -36,22 +50,47 @@ export function RecordingBar({ status, elapsedSeconds, error, audioLevel = 0, au
         {audioWarning ? <span className="warning-text">{audioWarning}</span> : null}
         {error ? <span className="error-text">{error}</span> : null}
         {exportButton}
-        {isRecording ? (
-          <button className="danger-button" onClick={onStop} title="Stop recording">
-            <Square size={16} />
-            <span>Stop</span>
+        <div className="recording-control-stack">
+          {isRecording ? (
+            <button className="danger-button" onClick={onStop} title="Stop recording">
+              <Square size={16} />
+              <span>Stop</span>
+            </button>
+          ) : isStarting ? (
+            <button className="danger-button" onClick={onCancel} title="Cancel recording start">
+              <X size={16} />
+              <span>Cancel</span>
+            </button>
+          ) : (
+            <button className="primary-button" onClick={onStart} disabled={isBusy} title="Start recording">
+              {isBusy ? <LoaderCircle size={16} className="spin" /> : <Mic size={16} />}
+              <span>Start</span>
+            </button>
+          )}
+          <button
+            className={`theme-toggle ${isLightMode ? "is-light" : ""}`}
+            type="button"
+            aria-pressed={isLightMode}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onToggleTheme?.();
+            }}
+            onKeyDown={(event) => {
+              if (event.repeat) {
+                event.preventDefault();
+              }
+            }}
+            title={isLightMode ? "Switch to dark mode" : "Switch to light mode"}
+          >
+            <span className="theme-toggle-track" aria-hidden="true">
+              <span className="theme-toggle-thumb">
+                {isLightMode ? <Sun size={11} /> : <Moon size={11} />}
+              </span>
+            </span>
+            <span>{isLightMode ? "Light" : "Dark"}</span>
           </button>
-        ) : isStarting ? (
-          <button className="danger-button" onClick={onCancel} title="Cancel recording start">
-            <X size={16} />
-            <span>Cancel</span>
-          </button>
-        ) : (
-          <button className="primary-button" onClick={onStart} disabled={isBusy} title="Start recording">
-            {isBusy ? <LoaderCircle size={16} className="spin" /> : <Mic size={16} />}
-            <span>Start</span>
-          </button>
-        )}
+        </div>
       </div>
     </header>
   );
