@@ -1,17 +1,47 @@
+# macOS / editor noise
 .DS_Store
+._*
+Icon?
+
+# Local environment and secrets
 .env
-*.pyc
+.env.*
+!.env.example
+!.env.*.example
+
+# Python
+*.py[cod]
+*$py.class
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
+# Backend local runtime state
 backend/.venv/
 backend/.env
 backend/celerybeat-schedule
+backend/celerybeat-schedule.*
 backend/storage/
 
+# Frontend dependencies and build output
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/coverage/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
+# Swift / native build output
+native/**/.build/
+native/**/.swiftpm/
+native/**/DerivedData/
+native/**/*.dSYM/
+native/**/output/
+
+# Local databases and containers
 pgdata/
