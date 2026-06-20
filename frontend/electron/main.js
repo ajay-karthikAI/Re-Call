@@ -1,10 +1,14 @@
-const { app, BrowserWindow, ipcMain, screen, session, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, screen, session, shell } = require("electron");
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
 
-const API_BASE_URL = process.env.RECALL_API_BASE_URL || "http://127.0.0.1:8000";
+const APP_ENV = (process.env.APP_ENV || "development").trim().toLowerCase();
+const LOCAL_API_BASE_URL = "http://127.0.0.1:8000";
+const LOCAL_API_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
+const API_BASE_URL = process.env.RECALL_API_BASE_URL || LOCAL_API_BASE_URL;
+const API_TOKEN = (process.env.RECALL_API_TOKEN || "").trim();
 let backendProcess = null;
 let workerProcess = null;
 let mainWindow = null;
@@ -12,16 +16,47 @@ let overlayWindow = null;
 let systemAudioProcess = null;
 let systemAudioDiagnostics = null;
 let isQuitting = false;
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
 
 function localBackendUrl() {
   try {
     const url = new URL(API_BASE_URL);
-    if (!["127.0.0.1", "localhost"].includes(url.hostname)) {
+    if (!LOCAL_API_HOSTS.has(url.hostname.toLowerCase())) {
       return null;
     }
     return url;
   } catch {
     return null;
+  }
+}
+
+function validateRuntimeConfig() {
+  const errors = [];
+  if (!["development", "production"].includes(APP_ENV)) {
+    errors.push("APP_ENV must be either development or production.");
+  }
+
+  let apiUrl = null;
+  try {
+    apiUrl = new URL(API_BASE_URL);
+  } catch {
+    errors.push("RECALL_API_BASE_URL must be a valid URL.");
+  }
+
+  if (APP_ENV === "production") {
+    if (!process.env.RECALL_API_BASE_URL) {
+      errors.push("RECALL_API_BASE_URL is required when APP_ENV=production.");
+    }
+    if (!API_TOKEN) {
+      errors.push("RECALL_API_TOKEN is required when APP_ENV=production.");
+    }
+    if (apiUrl && LOCAL_API_HOSTS.has(apiUrl.hostname.toLowerCase())) {
+      errors.push("RECALL_API_BASE_URL must not point to localhost when APP_ENV=production.");
+    }
+  }
+
+  if (errors.length) {
+    throw new Error(`[Re: Call] Invalid runtime configuration:\n - ${errors.join("\n - ")}`);
   }
 }
 
@@ -197,6 +232,14 @@ function createMainWindow() {
     return { action: "deny" };
   });
 
+  mainWindow.on("close", (event) => {
+    if (isQuitting) {
+      return;
+    }
+    event.preventDefault();
+    mainWindow.hide();
+  });
+
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -270,6 +313,14 @@ function createOverlayWindow() {
     return { action: "deny" };
   });
 
+  overlayWindow.on("close", (event) => {
+    if (isQuitting) {
+      return;
+    }
+    event.preventDefault();
+    overlayWindow.hide();
+  });
+
   overlayWindow.on("closed", () => {
     overlayWindow = null;
   });
@@ -290,6 +341,53 @@ function showOverlayWindow() {
   win.focus();
 }
 
+function showAllWindows() {
+  showMainWindow();
+  showOverlayWindow();
+}
+
+function configureRecoveryMenus() {
+  const recoveryItems = [
+    { label: "Show Dashboard", accelerator: "CommandOrControl+Shift+D", click: showMainWindow },
+    { label: "Show Overlay", accelerator: "CommandOrControl+Shift+O", click: showOverlayWindow },
+    { label: "Show Both", accelerator: "CommandOrControl+Shift+R", click: showAllWindows },
+  ];
+  const template = [
+    ...(process.platform === "darwin"
+      ? [{
+          label: app.name,
+          submenu: [
+            { role: "about" },
+            { type: "separator" },
+            ...recoveryItems,
+            { type: "separator" },
+            { role: "hide" },
+            { role: "hideOthers" },
+            { role: "unhide" },
+            { type: "separator" },
+            { role: "quit" },
+          ],
+        }]
+      : []),
+    {
+      label: "Window",
+      submenu: [
+        ...recoveryItems,
+        { type: "separator" },
+        { role: "minimize" },
+        { role: "close" },
+      ],
+    },
+    { role: "viewMenu" },
+  ];
+
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+
+  if (process.platform === "darwin" && app.dock) {
+    app.dock.setMenu(Menu.buildFromTemplate(recoveryItems));
+  }
+}
+
 function configurePermissions() {
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(["media", "microphone"].includes(permission));
@@ -301,7 +399,14 @@ function configurePermissions() {
 }
 
 function systemAudioFlagEnabled() {
-  return process.env.RECALL_ENABLE_SYSTEM_AUDIO === "true";
+  const rawValue = String(process.env.RECALL_ENABLE_SYSTEM_AUDIO || "").trim().toLowerCase();
+  if (["false", "0", "off", "no"].includes(rawValue)) {
+    return false;
+  }
+  if (["true", "1", "on", "yes"].includes(rawValue)) {
+    return true;
+  }
+  return process.platform === "darwin";
 }
 
 function systemAudioHelperPath() {
@@ -384,6 +489,10 @@ function startSystemAudioCapture(payload = {}) {
       "--chunk-seconds",
       String(payload.chunkSeconds || 6),
     ];
+    const apiToken = String(payload.apiToken || API_TOKEN || "").trim();
+    if (apiToken) {
+      helperArgs.push("--api-token", apiToken);
+    }
     if (payload.recordingStartedAtMs) {
       helperArgs.push("--recording-started-at-ms", String(payload.recordingStartedAtMs));
     }
@@ -514,42 +623,52 @@ function stopSystemAudioCapture() {
   });
 }
 
-app.whenReady().then(() => {
-  configurePermissions();
-  ipcMain.handle("recall:api-base", () => API_BASE_URL);
-  ipcMain.handle("recall:system-audio-status", () => systemAudioStatus());
-  ipcMain.handle("recall:start-system-audio", (_event, payload) => startSystemAudioCapture(payload));
-  ipcMain.handle("recall:stop-system-audio", () => stopSystemAudioCapture());
-  ipcMain.handle("recall:show-main-window", () => showMainWindow());
-  ipcMain.handle("recall:show-overlay-window", () => showOverlayWindow());
-  ipcMain.handle("recall:minimize-overlay-window", () => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.minimize();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (app.isReady()) {
+      showAllWindows();
     }
   });
-  ipcMain.handle("recall:hide-overlay-window", () => {
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.hide();
-    }
-  });
-  ipcMain.handle("recall:resize-overlay-window", (_event, payload = {}) => {
-    resizeOverlayWindow({ expanded: Boolean(payload.expanded), mode: payload.mode || "standard" });
-  });
-  startBackend();
-  startCeleryWorker();
-  createMainWindow();
-  createOverlayWindow();
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createMainWindow();
-      createOverlayWindow();
-    } else {
-      showMainWindow();
-      showOverlayWindow();
-    }
+  app.whenReady().then(() => {
+    validateRuntimeConfig();
+    configureRecoveryMenus();
+    configurePermissions();
+    ipcMain.handle("recall:api-base", () => API_BASE_URL);
+    ipcMain.handle("recall:api-token", () => API_TOKEN);
+    ipcMain.handle("recall:system-audio-status", () => systemAudioStatus());
+    ipcMain.handle("recall:start-system-audio", (_event, payload) => startSystemAudioCapture(payload));
+    ipcMain.handle("recall:stop-system-audio", () => stopSystemAudioCapture());
+    ipcMain.handle("recall:show-main-window", () => showMainWindow());
+    ipcMain.handle("recall:show-overlay-window", () => showOverlayWindow());
+    ipcMain.handle("recall:minimize-overlay-window", () => {
+      if (overlayWindow && !overlayWindow.isDestroyed()) {
+        overlayWindow.minimize();
+      }
+    });
+    ipcMain.handle("recall:hide-overlay-window", () => {
+      if (overlayWindow && !overlayWindow.isDestroyed()) {
+        overlayWindow.hide();
+      }
+    });
+    ipcMain.handle("recall:resize-overlay-window", (_event, payload = {}) => {
+      resizeOverlayWindow({ expanded: Boolean(payload.expanded), mode: payload.mode || "standard" });
+    });
+    startBackend();
+    startCeleryWorker();
+    createMainWindow();
+    createOverlayWindow();
+
+    app.on("activate", () => {
+      showAllWindows();
+    });
+  }).catch((error) => {
+    console.error(error);
+    app.quit();
   });
-});
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {

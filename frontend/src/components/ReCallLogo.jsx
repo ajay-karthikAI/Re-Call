@@ -1,8 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export function ReCallLogo({ className = "", src = "/recall-logo.png" }) {
   const [loaded, setLoaded] = useState(false);
   const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setLoaded(false);
+    setFailed(false);
+  }, [src]);
 
   return (
     <div className={`recall-logo ${className} ${loaded ? "is-loaded" : ""}`} aria-label="Re: Call">

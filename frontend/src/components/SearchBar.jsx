@@ -1,7 +1,8 @@
 import { LoaderCircle, Search } from "lucide-react";
 import { useState } from "react";
+import { apiFetch } from "../apiAuth.js";
 
-export function SearchBar({ apiBaseUrl }) {
+export function SearchBar({ apiBaseUrl, apiToken }) {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
@@ -15,11 +16,11 @@ export function SearchBar({ apiBaseUrl }) {
     setLoading(true);
     setError("");
     try {
-      const response = await fetch(`${apiBaseUrl}/api/search`, {
+      const response = await apiFetch(`${apiBaseUrl}/api/search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query, limit: 5 }),
-      });
+      }, apiToken);
       if (!response.ok) {
         throw new Error("Search failed");
       }

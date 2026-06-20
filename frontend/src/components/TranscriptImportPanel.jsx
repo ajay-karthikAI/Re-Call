@@ -1,5 +1,6 @@
 import { AlertCircle, CheckCircle2, FileText, LoaderCircle, Plug, RefreshCcw, Upload } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { apiFetch } from "../apiAuth.js";
 
 const PROVIDERS = [
   {
@@ -19,7 +20,7 @@ const PROVIDERS = [
   },
 ];
 
-export function TranscriptImportPanel({ apiBaseUrl, onImported }) {
+export function TranscriptImportPanel({ apiBaseUrl, apiToken, onImported }) {
   const [provider, setProvider] = useState("zoom");
   const [connections, setConnections] = useState([]);
   const [loadingConnections, setLoadingConnections] = useState(false);
@@ -43,7 +44,7 @@ export function TranscriptImportPanel({ apiBaseUrl, onImported }) {
   const loadConnections = useCallback(async () => {
     setLoadingConnections(true);
     try {
-      const response = await fetch(`${apiBaseUrl}/api/integrations/connections`);
+      const response = await apiFetch(`${apiBaseUrl}/api/integrations/connections`, {}, apiToken);
       if (!response.ok) {
         throw new Error("Could not load integrations");
       }
@@ -54,7 +55,7 @@ export function TranscriptImportPanel({ apiBaseUrl, onImported }) {
     } finally {
       setLoadingConnections(false);
     }
-  }, [apiBaseUrl]);
+  }, [apiBaseUrl, apiToken]);
 
   useEffect(() => {
     loadConnections();
@@ -72,7 +73,7 @@ export function TranscriptImportPanel({ apiBaseUrl, onImported }) {
     setMessage("");
 
     try {
-      const response = await fetch(`${apiBaseUrl}/api/integrations/${provider}/sync`, {
+      const response = await apiFetch(`${apiBaseUrl}/api/integrations/${provider}/sync`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -80,7 +81,7 @@ export function TranscriptImportPanel({ apiBaseUrl, onImported }) {
           limit: 5,
           teams_join_url: provider === "teams" ? teamsJoinUrl.trim() : null,
         }),
-      });
+      }, apiToken);
 
       if (!response.ok) {
         const detail = await response.json().catch(() => ({}));
@@ -121,10 +122,10 @@ export function TranscriptImportPanel({ apiBaseUrl, onImported }) {
         formData.append("transcript_file", file);
       }
 
-      const response = await fetch(`${apiBaseUrl}/api/integrations/transcript`, {
+      const response = await apiFetch(`${apiBaseUrl}/api/integrations/transcript`, {
         method: "POST",
         body: formData,
-      });
+      }, apiToken);
 
       if (!response.ok) {
         const detail = await response.json().catch(() => ({}));

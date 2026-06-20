@@ -4,6 +4,7 @@ from uuid import UUID
 import redis.asyncio as redis
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from auth import require_websocket_api_token
 from config import get_settings
 
 
@@ -12,6 +13,9 @@ router = APIRouter(tags=["websocket"])
 
 @router.websocket("/ws/meetings/{meeting_id}")
 async def meeting_events(websocket: WebSocket, meeting_id: UUID) -> None:
+    if not await require_websocket_api_token(websocket):
+        return
+
     await websocket.accept()
     client = redis.Redis.from_url(get_settings().redis_url)
     pubsub = client.pubsub()

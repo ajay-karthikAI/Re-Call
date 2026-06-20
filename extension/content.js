@@ -24,6 +24,7 @@ const EXPORT_OPTIONS = [
 
 const state = {
   apiBaseUrl: "http://127.0.0.1:8000",
+  apiToken: "",
   platform: detectPlatform(),
   status: "prompt",
   sessionId: null,
@@ -259,6 +260,7 @@ async function startRecording() {
     const mixedAudioStream = await buildMixedAudioStream();
     const startResponse = await sendExtensionMessage("recall:startRecording", {
       apiBaseUrl: state.apiBaseUrl,
+      apiToken: state.apiToken,
       platform: state.platform,
       title: getMeetingTitle(),
     });
@@ -276,6 +278,7 @@ async function startRecording() {
       const upload = blobToDataUrl(event.data).then((audioDataUrl) =>
         sendExtensionMessage("recall:uploadChunk", {
           apiBaseUrl: state.apiBaseUrl,
+          apiToken: state.apiToken,
           sessionId: state.sessionId,
           audioDataUrl,
           mimeType: event.data.type || recorder.mimeType || "audio/webm",
@@ -347,6 +350,7 @@ async function stopRecording() {
   await Promise.allSettled(state.uploadPromises);
   await sendExtensionMessage("recall:stopRecording", {
     apiBaseUrl: state.apiBaseUrl,
+    apiToken: state.apiToken,
     sessionId: state.sessionId,
     durationSeconds,
   });
@@ -369,6 +373,7 @@ function startMeetingPolling() {
     try {
       const meeting = await sendExtensionMessage("recall:getMeeting", {
         apiBaseUrl: state.apiBaseUrl,
+        apiToken: state.apiToken,
         sessionId: state.sessionId,
       });
       if (meeting.status === "complete") {
@@ -405,6 +410,7 @@ async function exportMeeting(format) {
   try {
     await sendExtensionMessage("recall:exportMeeting", {
       apiBaseUrl: state.apiBaseUrl,
+      apiToken: state.apiToken,
       sessionId: state.sessionId,
       format,
     });
@@ -881,6 +887,7 @@ async function init() {
   try {
     const settings = await sendExtensionMessage("recall:getSettings");
     state.apiBaseUrl = settings.apiBaseUrl || state.apiBaseUrl;
+    state.apiToken = settings.apiToken || "";
   } catch {
     // Keep the default API base URL.
   }

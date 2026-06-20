@@ -1,22 +1,21 @@
-x-backend-build: &backend-build
+x-recall-build: &recall-build
   build:
     context: .
     dockerfile: backend/Dockerfile
-  image: recall-backend:${RECALL_BACKEND_IMAGE_TAG:-latest}
+  image: recall-backend:${RECALL_IMAGE_TAG:-latest}
 
-x-backend-env: &backend-env
+x-recall-env: &recall-env
   APP_ENV: "${APP_ENV:-development}"
   APP_NAME: "${APP_NAME:-Re: Call}"
   API_PREFIX: "${API_PREFIX:-/api}"
   BACKEND_PUBLIC_URL: "${BACKEND_PUBLIC_URL:-http://127.0.0.1:8000}"
   FRONTEND_ORIGIN: "${FRONTEND_ORIGIN:-http://127.0.0.1:5173}"
-  RECALL_API_TOKEN: "${RECALL_API_TOKEN:-}"
   OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
   OPENAI_CHAT_MODEL: "${OPENAI_CHAT_MODEL:-gpt-5}"
   OPENAI_TRANSCRIPTION_MODEL: "${OPENAI_TRANSCRIPTION_MODEL:-whisper-1}"
   OPENAI_EMBEDDING_MODEL: "${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}"
   EMBEDDING_DIMENSIONS: "${EMBEDDING_DIMENSIONS:-1536}"
-  DATABASE_URL: "${DOCKER_DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-recall}:${POSTGRES_PASSWORD:-recall}@postgres:5432/${POSTGRES_DB:-recall}}"
+  DATABASE_URL: "${DOCKER_DATABASE_URL:-postgresql+asyncpg://${POSTGRES_USER:-recall}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before running docker-compose.app.yml}@postgres:5432/${POSTGRES_DB:-recall}}"
   REDIS_URL: "${DOCKER_REDIS_URL:-redis://redis:6379/0}"
   CELERY_BROKER_URL: "${DOCKER_CELERY_BROKER_URL:-${DOCKER_REDIS_URL:-redis://redis:6379/0}}"
   CELERY_RESULT_BACKEND: "${DOCKER_CELERY_RESULT_BACKEND:-${DOCKER_REDIS_URL:-redis://redis:6379/0}}"
@@ -26,7 +25,7 @@ x-backend-env: &backend-env
   # Local/dev fallback only. For APP_ENV=production, set S3_BUCKET_NAME so
   # recordings and exports use S3 instead of container-local disk.
   S3_BUCKET_NAME: "${S3_BUCKET_NAME:-}"
-  LOCAL_STORAGE_DIR: /app/storage
+  LOCAL_STORAGE_DIR: "/app/storage"
   ZOOM_CLIENT_ID: "${ZOOM_CLIENT_ID:-}"
   ZOOM_CLIENT_SECRET: "${ZOOM_CLIENT_SECRET:-}"
   ZOOM_OAUTH_SCOPES: "${ZOOM_OAUTH_SCOPES:-cloud_recording:read:list_recording_files cloud_recording:read:meeting_recording cloud_recording:read:meeting_transcript}"
@@ -45,35 +44,35 @@ services:
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-recall}"
       POSTGRES_USER: "${POSTGRES_USER:-recall}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-recall}"
-    ports:
-      - "5433:5432"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env before running docker-compose.app.yml}"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - app_pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - app_redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
   api:
-    <<: *backend-build
-    profiles:
-      - app
+    <<: *recall-build
     init: true
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      <<: *backend-env
+      <<: *recall-env
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
@@ -89,11 +88,10 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    restart: unless-stopped
 
   worker:
-    <<: *backend-build
-    profiles:
-      - app
+    <<: *recall-build
     init: true
     command:
       [
@@ -109,7 +107,7 @@ services:
         "recall-worker@%h",
       ]
     environment:
-      <<: *backend-env
+      <<: *recall-env
     volumes:
       - app_storage:/app/storage
     depends_on:
@@ -117,7 +115,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    restart: unless-stopped
 
 volumes:
-  pgdata:
+  app_pgdata:
+  app_redisdata:
   app_storage:

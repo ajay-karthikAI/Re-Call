@@ -24,6 +24,7 @@ struct AudioStats {
 
 struct CaptureArguments {
     let apiBaseURL: URL
+    let apiToken: String?
     let sessionID: String
     let chunkSeconds: Double
     let recordingStartedAtMs: Double
@@ -50,8 +51,10 @@ struct CaptureArguments {
 
         let chunkSeconds = Double(values["chunk-seconds"] ?? "6") ?? 6
         let recordingStartedAtMs = Double(values["recording-started-at-ms"] ?? "") ?? nowMilliseconds()
+        let apiToken = values["api-token"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         return CaptureArguments(
             apiBaseURL: apiBaseURL,
+            apiToken: apiToken?.isEmpty == false ? apiToken : nil,
             sessionID: sessionID,
             chunkSeconds: max(2, chunkSeconds),
             recordingStartedAtMs: recordingStartedAtMs
@@ -94,13 +97,15 @@ func nowMilliseconds() -> Double {
 
 final class ChunkUploader {
     private let uploadURL: URL
+    private let apiToken: String?
     private let sessionID: String
 
-    init(apiBaseURL: URL, sessionID: String) {
+    init(apiBaseURL: URL, apiToken: String?, sessionID: String) {
         self.uploadURL = apiBaseURL
             .appendingPathComponent("api")
             .appendingPathComponent("recording")
             .appendingPathComponent("system-chunk")
+        self.apiToken = apiToken
         self.sessionID = sessionID
     }
 
@@ -116,6 +121,9 @@ final class ChunkUploader {
             var request = URLRequest(url: uploadURL)
             request.httpMethod = "POST"
             request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
+            if let apiToken {
+                request.setValue("Bearer \(apiToken)", forHTTPHeaderField: "Authorization")
+            }
 
             let semaphore = DispatchSemaphore(value: 0)
             var uploadError: Error?
@@ -435,7 +443,7 @@ final class ScreenAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     init(arguments: CaptureArguments) {
         self.arguments = arguments
-        self.uploader = ChunkUploader(apiBaseURL: arguments.apiBaseURL, sessionID: arguments.sessionID)
+        self.uploader = ChunkUploader(apiBaseURL: arguments.apiBaseURL, apiToken: arguments.apiToken, sessionID: arguments.sessionID)
         super.init()
     }
 

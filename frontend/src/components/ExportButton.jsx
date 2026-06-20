@@ -1,5 +1,6 @@
 import { ChevronDown, Download, FileText, LoaderCircle, Presentation, ScrollText } from "lucide-react";
 import { useState } from "react";
+import { apiFetch, downloadFile } from "../apiAuth.js";
 
 const EXPORT_OPTIONS = [
   { format: "pptx", label: "PowerPoint", extension: "pptx", Icon: Presentation },
@@ -7,20 +8,10 @@ const EXPORT_OPTIONS = [
   { format: "pdf", label: "PDF", extension: "pdf", Icon: FileText },
 ];
 
-export function ExportButton({ apiBaseUrl, meeting }) {
+export function ExportButton({ apiBaseUrl, apiToken, meeting }) {
   const [open, setOpen] = useState(false);
   const [loadingFormat, setLoadingFormat] = useState("");
   const [error, setError] = useState("");
-
-  function downloadUrl(url, filename) {
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = filename || "";
-    link.rel = "noopener noreferrer";
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  }
 
   async function exportMeeting(format) {
     if (!meeting) {
@@ -30,7 +21,7 @@ export function ExportButton({ apiBaseUrl, meeting }) {
     setError("");
     setOpen(false);
     try {
-      const response = await fetch(`${apiBaseUrl}/api/export/${meeting.id}?format=${format}`, { method: "POST" });
+      const response = await apiFetch(`${apiBaseUrl}/api/export/${meeting.id}?format=${format}`, { method: "POST" }, apiToken);
       if (!response.ok) {
         const detail = await response.json().catch(() => ({}));
         throw new Error(detail.detail || "Export failed");
@@ -38,7 +29,7 @@ export function ExportButton({ apiBaseUrl, meeting }) {
       const data = await response.json();
       const url = data.download_url || data.pptx_url;
       if (url) {
-        downloadUrl(url, data.filename);
+        await downloadFile(url, data.filename, apiToken, apiBaseUrl);
       }
     } catch (exportError) {
       setError(exportError.message);

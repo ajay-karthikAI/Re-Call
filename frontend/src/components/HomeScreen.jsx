@@ -1,14 +1,14 @@
 import { LayoutList, LoaderCircle, Mic } from "lucide-react";
 import { ReCallLogo } from "./ReCallLogo.jsx";
 
-export function HomeScreen({ onStart, onDashboard, status, error }) {
+export function HomeScreen({ onStart, onDashboard, status, error, logoSrc }) {
   const isStarting = status === "starting";
 
   return (
     <main className="home-screen">
       <div className="home-grid" aria-hidden="true" />
       <section className="home-content">
-        <ReCallLogo className="home-logo" />
+        <ReCallLogo className="home-logo" src={logoSrc} />
         <p className="home-tagline">Meetings, enhanced by AI</p>
 
         {error ? <div className="home-error">{error}</div> : null}

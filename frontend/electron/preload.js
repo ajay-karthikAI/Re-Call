@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("recall", {
   getApiBaseUrl: () => ipcRenderer.invoke("recall:api-base"),
+  getApiToken: () => ipcRenderer.invoke("recall:api-token"),
   systemAudioStatus: () => ipcRenderer.invoke("recall:system-audio-status"),
   startSystemAudio: (payload) => ipcRenderer.invoke("recall:start-system-audio", payload),
   stopSystemAudio: () => ipcRenderer.invoke("recall:stop-system-audio"),

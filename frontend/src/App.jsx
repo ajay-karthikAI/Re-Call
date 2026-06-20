@@ -1,24 +1,49 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { CalendarDays, CheckSquare2, Clock3, Home, Users } from "lucide-react";
+import { CalendarDays, CheckSquare2, Clock3, Home, Moon, Sun, Users } from "lucide-react";
 import { ExportButton } from "./components/ExportButton.jsx";
 import { HomeScreen } from "./components/HomeScreen.jsx";
 import { LiveInsightsPanel } from "./components/LiveInsightsPanel.jsx";
 import { MeetingHistory } from "./components/MeetingHistory.jsx";
 import { RecordingBar } from "./components/RecordingBar.jsx";
 import { SearchBar } from "./components/SearchBar.jsx";
-import { TranscriptImportPanel } from "./components/TranscriptImportPanel.jsx";
 import { TranscriptPane } from "./components/TranscriptPane.jsx";
+import { apiFetch, getInitialApiToken } from "./apiAuth.js";
 import { useRecorder } from "./hooks/useRecorder.js";
 import { useWebSocket } from "./hooks/useWebSocket.js";
 
-const FALLBACK_API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const APP_ENV = (import.meta.env.VITE_APP_ENV || "development").trim().toLowerCase();
+const LOCAL_API_BASE = "http://127.0.0.1:8000";
+const LOCAL_API_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
+const FALLBACK_API_BASE = import.meta.env.VITE_API_BASE_URL || LOCAL_API_BASE;
 const HISTORY_PAGE_SIZE = 30;
 const THEME_STORAGE_KEY = "recall-theme";
+const DEFAULT_LOGO_SRC = "/recall-logo.png";
+const LIGHT_LOGO_SRC = "/recall-light-logo.png";
 const DASHBOARD_TABS = [
   { id: "summary", label: "Summary" },
   { id: "transcript", label: "Transcript" },
   { id: "insights", label: "Live Insights" },
 ];
+
+function warnIfProductionLocalApiBase() {
+  if (APP_ENV !== "production") {
+    return;
+  }
+
+  let url;
+  try {
+    url = new URL(FALLBACK_API_BASE);
+  } catch {
+    console.warn("[Re: Call] VITE_API_BASE_URL must be a valid deployed backend URL when VITE_APP_ENV=production.");
+    return;
+  }
+
+  if (!import.meta.env.VITE_API_BASE_URL || LOCAL_API_HOSTS.has(url.hostname.toLowerCase())) {
+    console.warn("[Re: Call] VITE_API_BASE_URL must not point to localhost when VITE_APP_ENV=production.");
+  }
+}
+
+warnIfProductionLocalApiBase();
 
 function apiErrorMessage(error) {
   if (error instanceof TypeError && /fetch/i.test(error.message || "")) {
@@ -135,6 +160,7 @@ function storeThemeMode(themeMode) {
 
 export default function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState(FALLBACK_API_BASE);
+  const [apiToken, setApiToken] = useState(getInitialApiToken);
   const [meetings, setMeetings] = useState([]);
   const meetingsRef = useRef([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -147,9 +173,12 @@ export default function App() {
   const [activeDashboardTab, setActiveDashboardTab] = useState("summary");
   const [themeMode, setThemeMode] = useState(getInitialThemeMode);
   const lastThemeToggleAtRef = useRef(0);
+  const isLightMode = themeMode === "light";
+  const logoSrc = isLightMode ? LIGHT_LOGO_SRC : DEFAULT_LOGO_SRC;
 
   useEffect(() => {
     window.recall?.getApiBaseUrl?.().then(setApiBaseUrl).catch(() => setApiBaseUrl(FALLBACK_API_BASE));
+    window.recall?.getApiToken?.().then((token) => setApiToken(token || getInitialApiToken())).catch(() => {});
     window.recall?.systemAudioStatus?.().then(setSystemAudioStatus).catch(() => setSystemAudioStatus({ enabled: false, available: false }));
   }, []);
 
@@ -182,7 +211,7 @@ export default function App() {
       const currentMeetings = meetingsRef.current;
       const offset = append ? currentMeetings.length : 0;
       const requestedLimit = append ? HISTORY_PAGE_SIZE + 1 : Math.max(HISTORY_PAGE_SIZE, currentMeetings.length) + 1;
-      const response = await fetch(`${apiBaseUrl}/api/meetings?limit=${requestedLimit}&offset=${offset}`);
+      const response = await apiFetch(`${apiBaseUrl}/api/meetings?limit=${requestedLimit}&offset=${offset}`, {}, apiToken);
       if (!response.ok) {
         throw new Error("Backend is not ready");
       }
@@ -210,7 +239,7 @@ export default function App() {
     } finally {
       setHistoryLoading(false);
     }
-  }, [apiBaseUrl]);
+  }, [apiBaseUrl, apiToken]);
 
   const loadMeeting = useCallback(
     async (meetingId) => {
@@ -218,7 +247,7 @@ export default function App() {
         setSelectedMeeting(null);
         return;
       }
-      const response = await fetch(`${apiBaseUrl}/api/meetings/${meetingId}`);
+      const response = await apiFetch(`${apiBaseUrl}/api/meetings/${meetingId}`, {}, apiToken);
       if (response.ok) {
         setSelectedMeeting(await response.json());
       } else if (response.status === 404) {
@@ -226,7 +255,7 @@ export default function App() {
         setSelectedId((current) => (current === meetingId ? null : current));
       }
     },
-    [apiBaseUrl]
+    [apiBaseUrl, apiToken]
   );
 
   useEffect(() => {
@@ -267,14 +296,6 @@ export default function App() {
     loadMeeting(session);
   }, [loadMeeting, loadMeetings]);
 
-  const handleTranscriptImported = useCallback((meeting) => {
-    setView("dashboard");
-    setSelectedId(meeting.id);
-    setSelectedMeeting(meeting);
-    loadMeetings();
-    loadMeeting(meeting.id);
-  }, [loadMeeting, loadMeetings]);
-
   const handleDeleteMeeting = useCallback(
     async (meeting) => {
       if (!meeting || meeting.status === "recording") {
@@ -287,7 +308,7 @@ export default function App() {
       }
 
       try {
-        const response = await fetch(`${apiBaseUrl}/api/meetings/${meeting.id}`, { method: "DELETE" });
+        const response = await apiFetch(`${apiBaseUrl}/api/meetings/${meeting.id}`, { method: "DELETE" }, apiToken);
         if (!response.ok) {
           throw new Error("Could not delete this meeting");
         }
@@ -309,17 +330,26 @@ export default function App() {
         setApiError(error.message);
       }
     },
-    [apiBaseUrl, selectedId]
+    [apiBaseUrl, apiToken, selectedId]
   );
 
   const startSystemCapture = useCallback(
     async (sessionId, options = {}) => {
-      if (!systemAudioStatus.enabled || !window.recall?.startSystemAudio) {
+      if (!window.recall?.startSystemAudio) {
+        return null;
+      }
+
+      const latestStatus = await window.recall?.systemAudioStatus?.().catch(() => null);
+      if (latestStatus) {
+        setSystemAudioStatus(latestStatus);
+      }
+      if (latestStatus?.enabled === false) {
         return null;
       }
 
       const result = await window.recall.startSystemAudio({
         apiBaseUrl,
+        apiToken,
         sessionId,
         chunkSeconds: 6,
         recordingStartedAtMs: options.recordingStartedAtMs,
@@ -341,14 +371,15 @@ export default function App() {
         stop: () => window.recall?.stopSystemAudio?.(),
       };
     },
-    [apiBaseUrl, systemAudioStatus.enabled]
+    [apiBaseUrl, apiToken, systemAudioStatus]
   );
 
   const recorder = useRecorder({
     apiBaseUrl,
+    apiToken,
     onSessionStarted: handleSessionStarted,
     onProcessingStarted: handleProcessingStarted,
-    startSystemAudioCapture: systemAudioStatus.enabled ? startSystemCapture : undefined,
+    startSystemAudioCapture: startSystemCapture,
   });
 
   const handleSocketMessage = useCallback(
@@ -429,7 +460,7 @@ export default function App() {
     [loadMeeting, loadMeetings, selectedId]
   );
 
-  useWebSocket(apiBaseUrl, selectedId, handleSocketMessage);
+  useWebSocket(apiBaseUrl, selectedId, handleSocketMessage, apiToken);
 
   async function startFromHome() {
     setView("dashboard");
@@ -441,6 +472,7 @@ export default function App() {
       <HomeScreen
         status={recorder.status}
         error={recorder.error || apiError}
+        logoSrc={logoSrc}
         onStart={startFromHome}
         onDashboard={() => setView("dashboard")}
       />
@@ -451,15 +483,29 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <img className="brand-logo-image" src="/recall-logo.png" alt="Re: Call logo" />
+          <img className="brand-logo-image" src={logoSrc} alt="Re: Call logo" />
           <h1>Re: Call</h1>
+          <button
+            className={`theme-toggle sidebar-theme-toggle ${isLightMode ? "is-light" : ""}`}
+            type="button"
+            aria-label={isLightMode ? "Switch to dark mode" : "Switch to light mode"}
+            aria-pressed={isLightMode}
+            onClick={toggleThemeMode}
+            title={isLightMode ? "Switch to dark mode" : "Switch to light mode"}
+          >
+            <span className="theme-toggle-track" aria-hidden="true">
+              <span className="theme-toggle-thumb">
+                {isLightMode ? <Sun size={11} /> : <Moon size={11} />}
+              </span>
+            </span>
+            <span>{isLightMode ? "Light" : "Dark"}</span>
+          </button>
         </div>
         <button className="sidebar-home-button" onClick={() => setView("home")}>
           <Home size={26} />
           <span>Home</span>
         </button>
-        <SearchBar apiBaseUrl={apiBaseUrl} />
-        <TranscriptImportPanel apiBaseUrl={apiBaseUrl} onImported={handleTranscriptImported} />
+        <SearchBar apiBaseUrl={apiBaseUrl} apiToken={apiToken} />
         <MeetingHistory
           title="Recent Calls"
           meetings={meetings}
@@ -488,8 +534,6 @@ export default function App() {
           onStop={recorder.stop}
           onCancel={recorder.cancel}
           activeMeeting={selectedMeeting}
-          themeMode={themeMode}
-          onToggleTheme={toggleThemeMode}
           exportButton={
             <>
               {window.recall?.showOverlayWindow ? (
@@ -497,7 +541,7 @@ export default function App() {
                   <span>Overlay</span>
                 </button>
               ) : null}
-              <ExportButton apiBaseUrl={apiBaseUrl} meeting={selectedMeeting} />
+              <ExportButton apiBaseUrl={apiBaseUrl} apiToken={apiToken} meeting={selectedMeeting} />
             </>
           }
         />

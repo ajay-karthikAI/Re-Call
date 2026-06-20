@@ -14,20 +14,74 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import { ChartCard, getStructuredChartCards } from "./components/ChartCard.jsx";
 import { ReCallLogo } from "./components/ReCallLogo.jsx";
 import { OverlayAskBar } from "./components/overlay/OverlayAskBar.jsx";
 import { OverlayFeed } from "./components/overlay/OverlayFeed.jsx";
+import { apiFetch, downloadFile, getInitialApiToken } from "./apiAuth.js";
 import { useRecorder } from "./hooks/useRecorder.js";
 import { useWebSocket } from "./hooks/useWebSocket.js";
 
-const FALLBACK_API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+const APP_ENV = (import.meta.env.VITE_APP_ENV || "development").trim().toLowerCase();
+const LOCAL_API_BASE = "http://127.0.0.1:8000";
+const LOCAL_API_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
+const FALLBACK_API_BASE = import.meta.env.VITE_API_BASE_URL || LOCAL_API_BASE;
+const THEME_STORAGE_KEY = "recall-theme";
+const DEFAULT_LOGO_SRC = "/recall-logo.png";
+const LIGHT_LOGO_SRC = "/recall-light-logo.png";
 const EXPORT_OPTIONS = [
   { format: "pptx", label: "PPT", Icon: Presentation },
   { format: "pdf", label: "PDF", Icon: FileText },
   { format: "markdown", label: "MD", Icon: ScrollText },
 ];
+
+function warnIfProductionLocalApiBase() {
+  if (APP_ENV !== "production") {
+    return;
+  }
+
+  let url;
+  try {
+    url = new URL(FALLBACK_API_BASE);
+  } catch {
+    console.warn("[Re: Call] VITE_API_BASE_URL must be a valid deployed backend URL when VITE_APP_ENV=production.");
+    return;
+  }
+
+  if (!import.meta.env.VITE_API_BASE_URL || LOCAL_API_HOSTS.has(url.hostname.toLowerCase())) {
+    console.warn("[Re: Call] VITE_API_BASE_URL must not point to localhost when VITE_APP_ENV=production.");
+  }
+}
+
+warnIfProductionLocalApiBase();
+
+function getOverlayThemeMode() {
+  if (typeof window === "undefined") {
+    return "dark";
+  }
+
+  const queryTheme = new URLSearchParams(window.location.search).get("theme");
+  if (queryTheme === "light" || queryTheme === "dark") {
+    return queryTheme;
+  }
+
+  try {
+    const storedTheme = window.localStorage?.getItem(THEME_STORAGE_KEY);
+    if (storedTheme === "light" || storedTheme === "dark") {
+      return storedTheme;
+    }
+  } catch {
+    // Fall back to the document theme below if storage is unavailable.
+  }
+
+  const domTheme = document.documentElement.dataset.theme;
+  if (domTheme === "light" || domTheme === "dark") {
+    return domTheme;
+  }
+
+  return "dark";
+}
 
 function asTextList(items = []) {
   return items
@@ -88,16 +142,6 @@ function formatTime(totalSeconds) {
   const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
   const seconds = String(totalSeconds % 60).padStart(2, "0");
   return `${minutes}:${seconds}`;
-}
-
-function downloadUrl(url, filename) {
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename || "";
-  link.rel = "noopener noreferrer";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
 }
 
 function getMeetingTitle() {
@@ -215,19 +259,39 @@ function RecordingInsightGrid({ meeting }) {
 
 export default function OverlayApp() {
   const [apiBaseUrl, setApiBaseUrl] = useState(FALLBACK_API_BASE);
+  const [apiToken, setApiToken] = useState(getInitialApiToken);
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [meeting, setMeeting] = useState(null);
   const [exportingFormat, setExportingFormat] = useState("");
   const [exportError, setExportError] = useState("");
   const [systemAudioStatus, setSystemAudioStatus] = useState({ enabled: false, available: false });
   const [localOverlayCards, setLocalOverlayCards] = useState([]);
+  const [themeMode, setThemeMode] = useState(getOverlayThemeMode);
+  const isLightMode = themeMode === "light";
+  const logoSrc = isLightMode ? LIGHT_LOGO_SRC : DEFAULT_LOGO_SRC;
+
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = themeMode;
+  }, [themeMode]);
 
   useEffect(() => {
     document.documentElement.classList.add("overlay-document");
     document.body.classList.add("overlay-body");
+    const syncThemeMode = () => setThemeMode(getOverlayThemeMode());
+    const handleStorageChange = (event) => {
+      if (event.key === THEME_STORAGE_KEY) {
+        syncThemeMode();
+      }
+    };
+
+    window.addEventListener("storage", handleStorageChange);
+    window.addEventListener("focus", syncThemeMode);
     window.recall?.getApiBaseUrl?.().then(setApiBaseUrl).catch(() => setApiBaseUrl(FALLBACK_API_BASE));
+    window.recall?.getApiToken?.().then((token) => setApiToken(token || getInitialApiToken())).catch(() => {});
     window.recall?.systemAudioStatus?.().then(setSystemAudioStatus).catch(() => setSystemAudioStatus({ enabled: false, available: false }));
     return () => {
+      window.removeEventListener("storage", handleStorageChange);
+      window.removeEventListener("focus", syncThemeMode);
       document.documentElement.classList.remove("overlay-document");
       document.body.classList.remove("overlay-body");
     };
@@ -235,12 +299,21 @@ export default function OverlayApp() {
 
   const startSystemCapture = useCallback(
     async (sessionId, options = {}) => {
-      if (!systemAudioStatus.enabled || !window.recall?.startSystemAudio) {
+      if (!window.recall?.startSystemAudio) {
+        return null;
+      }
+
+      const latestStatus = await window.recall?.systemAudioStatus?.().catch(() => null);
+      if (latestStatus) {
+        setSystemAudioStatus(latestStatus);
+      }
+      if (latestStatus?.enabled === false) {
         return null;
       }
 
       const result = await window.recall.startSystemAudio({
         apiBaseUrl,
+        apiToken,
         sessionId,
         chunkSeconds: 6,
         recordingStartedAtMs: options.recordingStartedAtMs,
@@ -262,7 +335,7 @@ export default function OverlayApp() {
         stop: () => window.recall?.stopSystemAudio?.(),
       };
     },
-    [apiBaseUrl, systemAudioStatus.enabled]
+    [apiBaseUrl, apiToken, systemAudioStatus]
   );
 
   const handleSessionStarted = useCallback((sessionId) => {
@@ -284,6 +357,7 @@ export default function OverlayApp() {
 
   const recorder = useRecorder({
     apiBaseUrl,
+    apiToken,
     getStartPayload: () => ({
       title: getMeetingTitle(),
       platform: "Desktop overlay",
@@ -291,7 +365,7 @@ export default function OverlayApp() {
     startTimeoutMs: 30000,
     onSessionStarted: handleSessionStarted,
     onProcessingStarted: handleProcessingStarted,
-    startSystemAudioCapture: systemAudioStatus.enabled ? startSystemCapture : undefined,
+    startSystemAudioCapture: startSystemCapture,
   });
 
   const handleSocketMessage = useCallback((message) => {
@@ -364,7 +438,7 @@ export default function OverlayApp() {
     }
   }, [activeSessionId]);
 
-  useWebSocket(apiBaseUrl, activeSessionId, handleSocketMessage);
+  useWebSocket(apiBaseUrl, activeSessionId, handleSocketMessage, apiToken);
 
   useEffect(() => {
     if (!activeSessionId || recorder.status !== "processing" || ["complete", "error"].includes(meeting?.status)) {
@@ -374,7 +448,7 @@ export default function OverlayApp() {
     let cancelled = false;
     async function loadMeeting() {
       try {
-        const response = await fetch(`${apiBaseUrl}/api/meetings/${activeSessionId}`);
+        const response = await apiFetch(`${apiBaseUrl}/api/meetings/${activeSessionId}`, {}, apiToken);
         if (!response.ok) {
           return;
         }
@@ -393,7 +467,7 @@ export default function OverlayApp() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [activeSessionId, apiBaseUrl, meeting?.status, recorder.status]);
+  }, [activeSessionId, apiBaseUrl, apiToken, meeting?.status, recorder.status]);
 
   function resetOverlayRecording() {
     recorder.cancel();
@@ -427,7 +501,7 @@ export default function OverlayApp() {
     setExportingFormat(format);
     setExportError("");
     try {
-      const response = await fetch(`${apiBaseUrl}/api/export/${activeSessionId}?format=${format}`, { method: "POST" });
+      const response = await apiFetch(`${apiBaseUrl}/api/export/${activeSessionId}?format=${format}`, { method: "POST" }, apiToken);
       if (!response.ok) {
         const detail = await response.json().catch(() => ({}));
         throw new Error(detail.detail || "Export failed");
@@ -437,7 +511,7 @@ export default function OverlayApp() {
       if (!url) {
         throw new Error("Export finished, but no download URL was returned.");
       }
-      downloadUrl(url, data.filename);
+      await downloadFile(url, data.filename, apiToken, apiBaseUrl);
       resetOverlayRecording();
     } catch (error) {
       setExportError(error.message);
@@ -472,7 +546,7 @@ export default function OverlayApp() {
         <button className="overlay-icon-button" onClick={() => window.recall?.minimizeOverlayWindow?.()} title="Minimize overlay" aria-label="Minimize overlay">
           <Minus size={14} />
         </button>
-        <button className="overlay-icon-button" onClick={() => window.recall?.hideOverlayWindow?.()} title="Exit overlay" aria-label="Exit overlay">
+        <button className="overlay-icon-button" onClick={() => window.recall?.hideOverlayWindow?.()} title="Hide overlay" aria-label="Hide overlay">
           <X size={14} />
         </button>
       </div>
@@ -482,7 +556,7 @@ export default function OverlayApp() {
           <>
             <div className="overlay-idle-layout">
               <div className="overlay-left-actions">
-                <ReCallLogo className="overlay-logo" />
+                <ReCallLogo className="overlay-logo" src={logoSrc} />
                 <button className="overlay-dashboard-button" onClick={() => window.recall?.showMainWindow?.()}>
                   <LayoutDashboard size={16} />
                   <span>Dashboard</span>
@@ -503,7 +577,7 @@ export default function OverlayApp() {
           <>
             <div className="overlay-drag-row">
               <div className="overlay-brand">
-                <ReCallLogo className="overlay-mini-logo" />
+                <ReCallLogo className="overlay-mini-logo" src={logoSrc} />
                 <div>
                   <strong>Re: Call</strong>
                   <small>Meeting ready</small>
@@ -537,7 +611,7 @@ export default function OverlayApp() {
           <>
             <div className="overlay-drag-row">
               <div className="overlay-brand">
-                <ReCallLogo className="overlay-mini-logo" />
+                <ReCallLogo className="overlay-mini-logo" src={logoSrc} />
                 <div>
                   <strong>Re: Call</strong>
                   <small>Needs attention</small>
@@ -567,7 +641,7 @@ export default function OverlayApp() {
             ))}
             <div className="overlay-recording-bar">
               <div className="overlay-recording-left">
-                <ReCallLogo className="overlay-logo" />
+                <ReCallLogo className="overlay-logo" src={logoSrc} />
                 <button className="overlay-dashboard-button" onClick={() => window.recall?.showMainWindow?.()}>
                   <LayoutDashboard size={16} />
                   <span>Dashboard</span>
@@ -591,7 +665,7 @@ export default function OverlayApp() {
           <>
             <div className="overlay-drag-row">
               <div className="overlay-brand">
-                <ReCallLogo className="overlay-mini-logo" />
+                <ReCallLogo className="overlay-mini-logo" src={logoSrc} />
                 <div>
                   <strong>Re: Call</strong>
                   <small>{isStarting ? "Starting" : "Transcribing"}</small>

@@ -1,12 +1,23 @@
 import { useEffect } from "react";
+import { normalizeApiToken } from "../apiAuth.js";
 
-export function useWebSocket(apiBaseUrl, meetingId, onMessage) {
+function websocketUrl(apiBaseUrl, meetingId, apiToken) {
+  const url = new URL(`/ws/meetings/${meetingId}`, apiBaseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const token = normalizeApiToken(apiToken);
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  return url.toString();
+}
+
+export function useWebSocket(apiBaseUrl, meetingId, onMessage, apiToken = "") {
   useEffect(() => {
     if (!apiBaseUrl || !meetingId) {
       return undefined;
     }
 
-    const wsUrl = apiBaseUrl.replace(/^http/, "ws") + `/ws/meetings/${meetingId}`;
+    const wsUrl = websocketUrl(apiBaseUrl, meetingId, apiToken);
     const socket = new WebSocket(wsUrl);
 
     socket.onmessage = (event) => {
@@ -18,5 +29,5 @@ export function useWebSocket(apiBaseUrl, meetingId, onMessage) {
     };
 
     return () => socket.close();
-  }, [apiBaseUrl, meetingId, onMessage]);
+  }, [apiBaseUrl, apiToken, meetingId, onMessage]);
 }

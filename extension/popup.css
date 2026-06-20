@@ -76,6 +76,10 @@ input {
   font: inherit;
 }
 
+input + label {
+  margin-top: 12px;
+}
+
 input:focus-visible,
 button:focus-visible {
   outline: 2px solid rgba(168, 255, 96, 0.72);

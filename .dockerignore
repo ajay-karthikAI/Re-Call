@@ -1,7 +1,9 @@
-# macOS / editor noise
+# VCS and local agent/editor state
+.git/
+.agents/
+.codex/
 .DS_Store
-._*
-Icon?
+**/.DS_Store
 
 # Local environment and secrets
 .env
@@ -9,27 +11,19 @@ Icon?
 !.env.example
 !.env.*.example
 
-# Python
-*.py[cod]
-*$py.class
-__pycache__/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-.coverage
-htmlcov/
-
-# Backend local runtime state
+# Python caches and local runtime state
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
 backend/.venv/
-backend/.env
-backend/celerybeat-schedule
-backend/celerybeat-schedule.*
 backend/storage/
+backend/celerybeat-schedule*
 
 # Frontend dependencies and build output
 frontend/node_modules/
 frontend/dist/
-frontend/release/
 frontend/.vite/
 frontend/coverage/
 npm-debug.log*
@@ -37,12 +31,10 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Swift / native build output
+# Native and generated build output
 native/**/.build/
 native/**/.swiftpm/
 native/**/DerivedData/
 native/**/*.dSYM/
 native/**/output/
-
-# Local databases and containers
 pgdata/

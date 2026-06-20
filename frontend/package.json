@@ -7,18 +7,75 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "electron": "concurrently -k \"npm run dev\" \"wait-on http://127.0.0.1:5173 && env -u ELECTRON_RUN_AS_NODE electron .\"",
+    "electron:open": "wait-on http://127.0.0.1:5173 && env -u ELECTRON_RUN_AS_NODE electron .",
+    "build:native": "cd ../native/macos-screen-capture && CLANG_MODULE_CACHE_PATH=/private/tmp/recall-clang-cache swift build -c release --cache-path /private/tmp/recall-swiftpm-cache",
     "build": "vite build",
+    "package": "npm run build:native && npm run build && electron-builder --dir --publish never",
+    "dist": "npm run build:native && npm run build && electron-builder --publish never",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
     "concurrently": "^9.0.0",
-    "electron": "^32.0.0",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "vite": "^5.4.0",
     "wait-on": "^8.0.0"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.recall.desktop",
+    "productName": "Re: Call",
+    "artifactName": "Re-Call-${version}-${os}-${arch}.${ext}",
+    "asar": true,
+    "directories": {
+      "buildResources": "build",
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "public/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../native/macos-screen-capture/.build/release/recall-macos-capture",
+        "to": "native/recall-macos-capture"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Re: Call records meeting audio when you start a recording.",
+        "NSScreenCaptureUsageDescription": "Re: Call captures system audio from meetings when you start a recording."
+      },
+      "icon": "build/icon.icns",
+      "identity": null,
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "dmg": {
+      "artifactName": "Re-Call-${version}-${arch}.${ext}"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "Re-Call-Setup-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Utility",
+      "artifactName": "Re-Call-${version}-${arch}.${ext}"
+    }
+  }
 }

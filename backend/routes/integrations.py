@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth import require_api_token
 from database import get_session
 from models import IntegrationConnection, Meeting, MeetingStatus
 from schemas import (
@@ -42,7 +43,7 @@ from tasks.pptx_task import generate_pptx_task
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 
-@router.get("/connections", response_model=IntegrationConnectionsResponse)
+@router.get("/connections", response_model=IntegrationConnectionsResponse, dependencies=[Depends(require_api_token)])
 async def list_connections(session: AsyncSession = Depends(get_session)) -> IntegrationConnectionsResponse:
     stored_connections = (
         await session.execute(select(IntegrationConnection).where(IntegrationConnection.provider.in_(SUPPORTED_PROVIDERS)))
@@ -124,7 +125,7 @@ async def provider_callback(
     )
 
 
-@router.post("/{provider}/sync", response_model=IntegrationSyncResponse)
+@router.post("/{provider}/sync", response_model=IntegrationSyncResponse, dependencies=[Depends(require_api_token)])
 async def sync_provider_transcripts(
     provider: str,
     payload: Optional[IntegrationSyncRequest] = Body(default=None),
@@ -178,7 +179,12 @@ async def sync_provider_transcripts(
     )
 
 
-@router.post("/transcript", response_model=MeetingResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/transcript",
+    response_model=MeetingResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_api_token)],
+)
 async def import_transcript(
     provider: str = Form(...),
     title: Optional[str] = Form(default=None),

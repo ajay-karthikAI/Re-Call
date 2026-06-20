@@ -1,4 +1,4 @@
-import { LoaderCircle, Mic, Moon, Square, Sun, X } from "lucide-react";
+import { LoaderCircle, Mic, Square, X } from "lucide-react";
 
 function formatTime(totalSeconds) {
   const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, "0");
@@ -17,14 +17,11 @@ export function RecordingBar({
   onCancel,
   activeMeeting,
   exportButton,
-  themeMode = "dark",
-  onToggleTheme,
 }) {
   const isRecording = status === "recording";
   const isStarting = status === "starting";
   const isBusy = ["starting", "stopping"].includes(status);
   const meterLevel = Math.min(1, audioLevel * 18);
-  const isLightMode = themeMode === "light";
 
   return (
     <header className="recording-bar">
@@ -67,29 +64,6 @@ export function RecordingBar({
               <span>Start</span>
             </button>
           )}
-          <button
-            className={`theme-toggle ${isLightMode ? "is-light" : ""}`}
-            type="button"
-            aria-pressed={isLightMode}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              onToggleTheme?.();
-            }}
-            onKeyDown={(event) => {
-              if (event.repeat) {
-                event.preventDefault();
-              }
-            }}
-            title={isLightMode ? "Switch to dark mode" : "Switch to light mode"}
-          >
-            <span className="theme-toggle-track" aria-hidden="true">
-              <span className="theme-toggle-thumb">
-                {isLightMode ? <Sun size={11} /> : <Moon size={11} />}
-              </span>
-            </span>
-            <span>{isLightMode ? "Light" : "Dark"}</span>
-          </button>
         </div>
       </div>
     </header>

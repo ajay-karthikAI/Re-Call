@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { withApiAuth } from "../apiAuth.js";
 
 const START_TIMEOUT_MS = 12000;
 const CHUNK_TIMEOUT_MS = 20000;
@@ -115,6 +116,7 @@ function getAudioDiagnostics(stats) {
 
 export function useRecorder({
   apiBaseUrl,
+  apiToken,
   onSessionStarted,
   onProcessingStarted,
   getAudioStream = getMicrophoneStream,
@@ -167,14 +169,14 @@ export function useRecorder({
       formData.append("audio", blob, `chunk-${Date.now()}.webm`);
       const upload = fetchWithTimeout(
         `${apiBaseUrl}/api/recording/chunk`,
-        { method: "POST", body: formData },
+        withApiAuth({ method: "POST", body: formData }, apiToken),
         CHUNK_TIMEOUT_MS,
         "Audio upload"
       );
       uploadPromisesRef.current.push(upload);
       await upload;
     },
-    [apiBaseUrl]
+    [apiBaseUrl, apiToken]
   );
 
   const cancel = useCallback(() => {
@@ -251,13 +253,16 @@ export function useRecorder({
       const startPayload = getStartPayload?.() || null;
       const response = await fetchWithTimeout(
         `${apiBaseUrl}/api/recording/start`,
-        startPayload
-          ? {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(startPayload),
-            }
-          : { method: "POST" },
+        withApiAuth(
+          startPayload
+            ? {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(startPayload),
+              }
+            : { method: "POST" },
+          apiToken
+        ),
         startTimeoutMs,
         "Recording session"
       );
@@ -342,7 +347,7 @@ export function useRecorder({
       setStatus("idle");
       setError(recordingError.message);
     }
-  }, [apiBaseUrl, getAudioStream, getStartPayload, onSessionStarted, startSystemAudioCapture, startTimeoutMs, uploadChunk]);
+  }, [apiBaseUrl, apiToken, getAudioStream, getStartPayload, onSessionStarted, startSystemAudioCapture, startTimeoutMs, uploadChunk]);
 
   const stop = useCallback(async () => {
     if (!sessionId || !mediaRecorderRef.current) {
@@ -398,11 +403,14 @@ export function useRecorder({
       systemCaptureDiagnosticsRef.current = null;
       await fetchWithTimeout(
         `${apiBaseUrl}/api/recording/stop`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: sessionId, duration_seconds: duration, capture_diagnostics: captureDiagnostics }),
-        },
+        withApiAuth(
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId, duration_seconds: duration, capture_diagnostics: captureDiagnostics }),
+          },
+          apiToken
+        ),
         startTimeoutMs,
         "Stop recording"
       );
@@ -412,7 +420,7 @@ export function useRecorder({
       setStatus("idle");
       setError(stopError.message);
     }
-  }, [apiBaseUrl, onProcessingStarted, sessionId, startTimeoutMs]);
+  }, [apiBaseUrl, apiToken, onProcessingStarted, sessionId, startTimeoutMs]);
 
   return {
     status,

@@ -1,6 +1,7 @@
 const DEFAULT_API_BASE_URL = "http://127.0.0.1:8000";
 
 const input = document.getElementById("apiBaseUrl");
+const tokenInput = document.getElementById("apiToken");
 const saveButton = document.getElementById("saveButton");
 const testButton = document.getElementById("testButton");
 const statusText = document.getElementById("status");
@@ -15,14 +16,17 @@ function setStatus(message, mode = "") {
 }
 
 async function load() {
-  const stored = await chrome.storage.local.get({ apiBaseUrl: DEFAULT_API_BASE_URL });
+  const stored = await chrome.storage.local.get({ apiBaseUrl: DEFAULT_API_BASE_URL, apiToken: "" });
   input.value = normalizeUrl(stored.apiBaseUrl);
+  tokenInput.value = String(stored.apiToken || "");
 }
 
 async function save() {
   const apiBaseUrl = normalizeUrl(input.value);
-  await chrome.storage.local.set({ apiBaseUrl });
+  const apiToken = String(tokenInput.value || "").trim();
+  await chrome.storage.local.set({ apiBaseUrl, apiToken });
   input.value = apiBaseUrl;
+  tokenInput.value = apiToken;
   setStatus("Saved.", "ok");
 }
 

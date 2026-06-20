@@ -5,13 +5,35 @@ function normalizedApiBaseUrl(value) {
   return trimmed || DEFAULT_API_BASE_URL;
 }
 
-async function getSettings() {
-  const stored = await chrome.storage.local.get({ apiBaseUrl: DEFAULT_API_BASE_URL });
-  return { apiBaseUrl: normalizedApiBaseUrl(stored.apiBaseUrl) };
+function normalizedApiToken(value) {
+  return String(value || "").trim();
 }
 
-async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
+async function getSettings() {
+  const stored = await chrome.storage.local.get({ apiBaseUrl: DEFAULT_API_BASE_URL, apiToken: "" });
+  return {
+    apiBaseUrl: normalizedApiBaseUrl(stored.apiBaseUrl),
+    apiToken: normalizedApiToken(stored.apiToken),
+  };
+}
+
+function withApiAuth(options = {}, apiToken = "") {
+  const token = normalizedApiToken(apiToken);
+  if (!token) {
+    return options;
+  }
+
+  return {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      Authorization: `Bearer ${token}`,
+    },
+  };
+}
+
+async function fetchJson(url, options = {}, apiToken = "") {
+  const response = await fetch(url, withApiAuth(options, apiToken));
   if (!response.ok) {
     let message = `${options.method || "GET"} ${url} failed (${response.status})`;
     try {
@@ -23,6 +45,45 @@ async function fetchJson(url, options = {}) {
     throw new Error(message);
   }
   return response.json();
+}
+
+async function blobToDataUrl(blob) {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return `data:${blob.type || "application/octet-stream"};base64,${btoa(binary)}`;
+}
+
+function shouldUseAuthenticatedDownload(downloadUrl, apiBaseUrl, apiToken) {
+  if (!normalizedApiToken(apiToken)) {
+    return false;
+  }
+  try {
+    const targetUrl = new URL(downloadUrl);
+    return targetUrl.pathname.startsWith("/api/files/");
+  } catch {
+    return false;
+  }
+}
+
+async function downloadFile(downloadUrl, filename, apiBaseUrl, apiToken) {
+  let url = downloadUrl;
+  if (shouldUseAuthenticatedDownload(downloadUrl, apiBaseUrl, apiToken)) {
+    const response = await fetch(downloadUrl, withApiAuth({}, apiToken));
+    if (!response.ok) {
+      throw new Error(`Download failed (${response.status})`);
+    }
+    url = await blobToDataUrl(await response.blob());
+  }
+
+  await chrome.downloads.download({
+    url,
+    filename: filename || undefined,
+    saveAs: true,
+  });
 }
 
 function extensionForMimeType(mimeType) {
@@ -59,6 +120,7 @@ function blobFromPayload(payload) {
 
 async function startRecording(payload) {
   const apiBaseUrl = normalizedApiBaseUrl(payload.apiBaseUrl);
+  const apiToken = normalizedApiToken(payload.apiToken);
   return fetchJson(`${apiBaseUrl}/api/recording/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -66,11 +128,12 @@ async function startRecording(payload) {
       title: payload.title || "",
       platform: payload.platform || "",
     }),
-  });
+  }, apiToken);
 }
 
 async function uploadChunk(payload) {
   const apiBaseUrl = normalizedApiBaseUrl(payload.apiBaseUrl);
+  const apiToken = normalizedApiToken(payload.apiToken);
   const formData = new FormData();
   const mimeType = payload.mimeType || "audio/webm";
   const audioBlob = blobFromPayload(payload);
@@ -82,13 +145,14 @@ async function uploadChunk(payload) {
   await fetchJson(`${apiBaseUrl}/api/recording/chunk`, {
     method: "POST",
     body: formData,
-  });
+  }, apiToken);
 
   return { status: "accepted" };
 }
 
 async function stopRecording(payload) {
   const apiBaseUrl = normalizedApiBaseUrl(payload.apiBaseUrl);
+  const apiToken = normalizedApiToken(payload.apiToken);
   return fetchJson(`${apiBaseUrl}/api/recording/stop`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -96,31 +160,29 @@ async function stopRecording(payload) {
       session_id: payload.sessionId,
       duration_seconds: payload.durationSeconds || 0,
     }),
-  });
+  }, apiToken);
 }
 
 async function getMeeting(payload) {
   const apiBaseUrl = normalizedApiBaseUrl(payload.apiBaseUrl);
-  return fetchJson(`${apiBaseUrl}/api/meetings/${payload.sessionId}`);
+  const apiToken = normalizedApiToken(payload.apiToken);
+  return fetchJson(`${apiBaseUrl}/api/meetings/${payload.sessionId}`, {}, apiToken);
 }
 
 async function exportMeeting(payload) {
   const apiBaseUrl = normalizedApiBaseUrl(payload.apiBaseUrl);
+  const apiToken = normalizedApiToken(payload.apiToken);
   const format = encodeURIComponent(payload.format || "pptx");
   const data = await fetchJson(`${apiBaseUrl}/api/export/${payload.sessionId}?format=${format}`, {
     method: "POST",
-  });
+  }, apiToken);
   const downloadUrl = data.download_url || data.pptx_url;
 
   if (!downloadUrl) {
     throw new Error("Export finished, but no download URL was returned.");
   }
 
-  await chrome.downloads.download({
-    url: downloadUrl,
-    filename: data.filename || undefined,
-    saveAs: true,
-  });
+  await downloadFile(downloadUrl, data.filename, apiBaseUrl, apiToken);
 
   return data;
 }

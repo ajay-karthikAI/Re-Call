@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from auth import require_api_token
 from config import get_settings
 from database import ensure_vector_extension, run_migrations_async
 from routes import export, files, integrations, meetings, recording, search, ws
@@ -23,24 +24,21 @@ app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        settings.frontend_origin,
-        "http://localhost:5173",
-        "http://127.0.0.1:5174",
-        "http://localhost:5174",
-    ],
+    allow_origins=settings.allowed_cors_origins,
     allow_origin_regex=r"chrome-extension://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(recording.router)
-app.include_router(meetings.router)
-app.include_router(search.router)
-app.include_router(export.router)
+protected_api_dependencies = [Depends(require_api_token)]
+
+app.include_router(recording.router, dependencies=protected_api_dependencies)
+app.include_router(meetings.router, dependencies=protected_api_dependencies)
+app.include_router(search.router, dependencies=protected_api_dependencies)
+app.include_router(export.router, dependencies=protected_api_dependencies)
 app.include_router(integrations.router)
-app.include_router(files.router)
+app.include_router(files.router, dependencies=protected_api_dependencies)
 app.include_router(ws.router)
 
 

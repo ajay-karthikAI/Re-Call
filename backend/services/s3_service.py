@@ -28,7 +28,7 @@ def _bucket_name() -> str:
 
 
 def _using_local_storage() -> bool:
-    return not bool(_bucket_name())
+    return not get_settings().uses_s3_storage
 
 
 def _local_storage_root() -> Path:
