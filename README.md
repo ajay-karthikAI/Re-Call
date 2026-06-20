@@ -1,85 +1,418 @@
 # Re: Call
 
-Re: Call is a desktop meeting notes app built with Electron, React, FastAPI, Celery, Redis, PostgreSQL, pgvector, OpenAI transcription/analysis/embeddings, and export storage. Local dev can use filesystem storage; production should use S3.
+Re: Call is a desktop meeting-memory app for recording calls, generating live assistance, and turning conversations into searchable notes and exports.
+
+It combines an Electron + React desktop UI with a FastAPI backend, Celery workers, Redis, PostgreSQL + pgvector, OpenAI transcription/analysis/embeddings, local or S3-backed file storage, an unpacked browser meeting overlay extension, and an experimental macOS ScreenCaptureKit helper for system audio.
+
+## Contents
+
+- [What It Does](#what-it-does)
+- [Quick Start](#quick-start)
+- [Docker Workflows](#docker-workflows)
+- [Desktop App And Overlay](#desktop-app-and-overlay)
+- [Transcript Integrations](#transcript-integrations)
+- [Production Configuration](#production-configuration)
+- [Packaging](#packaging)
+- [Processing Pipeline](#processing-pipeline)
+- [Verification Commands](#verification-commands)
+
+## What It Does
+
+- Records meetings from the Electron dashboard or always-on-top desktop overlay.
+- Captures microphone audio everywhere, with experimental macOS system-audio capture when the native helper is available.
+- Streams live transcript previews, summaries, risks, action items, suggested answers, and structured chart cards.
+- Imports provider transcripts from Zoom, Google Meet, Microsoft Teams, or manual `.vtt`, `.srt`, `.txt`, and `.docx` uploads.
+- Generates structured notes with summary, key decisions, next steps, participants, topics, sentiment, and technical/code sections when relevant.
+- Exports meeting notes as PowerPoint, Markdown, or PDF.
+- Embeds transcript chunks into pgvector for retrieval-augmented search across past meetings.
+- Includes an unpacked Chrome/Edge extension for Google Meet web, Teams web, and Zoom web client.
+
+## Stack
+
+- Desktop/frontend: Electron, React, Vite, lucide-react
+- Backend: FastAPI, SQLAlchemy async, Alembic, Pydantic settings
+- Async work: Celery, Redis
+- Data: PostgreSQL 16 with pgvector
+- AI: OpenAI chat, Whisper transcription, `text-embedding-3-large`
+- Exports/storage: python-pptx, generated Markdown/PDF, local filesystem or AWS S3
+- Native helper: Swift 5.9 ScreenCaptureKit executable for macOS 13+
+
+## Repository Layout
+
+```text
+.
+|-- backend/
+|   |-- main.py                 # FastAPI app, CORS, routers, startup migration hook
+|   |-- config.py               # Environment settings and production validation
+|   |-- database.py             # Async SQLAlchemy, migrations, pgvector extension
+|   |-- models.py               # Meeting, integration, transcript chunk tables
+|   |-- routes/                 # Recording, meetings, export, integrations, search, files, ws
+|   |-- services/               # AI, storage, export, transcript, live insight, RAG services
+|   |-- tasks/                  # Celery transcription, analysis, embedding, export tasks
+|   `-- migrations/
+|-- frontend/
+|   |-- electron/               # Main/preload processes, windows, helper spawning
+|   |-- src/                    # React dashboard, overlay, hooks, components, styles
+|   |-- public/                 # Re: Call logos
+|   `-- package.json            # Vite/Electron/electron-builder scripts
+|-- extension/                  # Unpacked Chrome/Edge meeting overlay
+|-- native/macos-screen-capture/ # macOS ScreenCaptureKit system-audio helper
+|-- docker-compose.yml          # Local infra plus optional app profile
+|-- docker-compose.app.yml      # Fuller app stack variant
+|-- .env.example
+`-- PROJECT_CONTEXT.md
+```
 
 ## Prerequisites
 
 - Node 20+
 - Python 3.11+
 - Docker Desktop
-- ffmpeg
-- AWS region plus credentials or an instance/task role with access to the S3 bucket in `S3_BUCKET_NAME` for production storage
+- ffmpeg for non-Docker backend runs
 - OpenAI API key
+- Swift toolchain only if you are building the macOS system-audio helper locally
+- AWS bucket, region, and credentials or instance/task role for production S3 storage
 
-## Local Dev Setup
+## Quick Start
 
-1. Start Postgres with pgvector and Redis:
+Create a local environment file from the repo root and add your OpenAI key:
 
-   ```bash
-   docker compose up -d
-   ```
+```bash
+cp .env.example .env
+```
 
-2. Create a backend virtual environment and install dependencies:
+At minimum, set:
 
-   ```bash
-   cd backend
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
+```bash
+OPENAI_API_KEY=sk-...
+```
 
-3. Create your environment file:
+Start local infrastructure:
 
-   ```bash
-   cp ../.env.example ../.env
-   ```
+```bash
+docker compose up -d
+```
 
-4. Run migrations:
+This starts:
 
-   ```bash
-   PYTHONDONTWRITEBYTECODE=1 python -m alembic upgrade head
-   ```
+- PostgreSQL + pgvector on `127.0.0.1:5433`
+- Redis on `127.0.0.1:6379`
 
-5. Start the API:
+Set up the backend:
 
-   ```bash
-   PYTHONDONTWRITEBYTECODE=1 python -m uvicorn main:app --host 127.0.0.1 --port 8000
-   ```
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+PYTHONDONTWRITEBYTECODE=1 python -m alembic upgrade head
+```
 
-6. Start the Celery worker from `backend/` in another terminal:
+Run the API:
 
-   ```bash
-   PYTHONDONTWRITEBYTECODE=1 python -m celery -A tasks.celery_app:celery_app worker --loglevel=info -Q transcription,analysis,live_insights --concurrency=1 -n recall@%h
-   ```
+```bash
+cd backend
+source .venv/bin/activate
+PYTHONDONTWRITEBYTECODE=1 python -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
 
-   The worker must listen to every routed queue:
+Run the Celery worker in another terminal:
 
-   - `transcription`: audio transcription
-   - `analysis`: summaries, exports, embeddings, etc.
-   - `live_insights`: real-time overlay/live AI cards
+```bash
+cd backend
+source .venv/bin/activate
+PYTHONDONTWRITEBYTECODE=1 python -m celery -A tasks.celery_app:celery_app worker --loglevel=info -Q transcription,analysis,live_insights --concurrency=1 -n recall@%h
+```
 
-7. Start the desktop app:
-
-   ```bash
-   cd ../frontend
-   npm install
-   RECALL_START_BACKEND=false npm run electron
-   ```
-
-The Electron process can spawn FastAPI automatically in development. Use `RECALL_START_BACKEND=false` when you are already running `uvicorn` yourself.
-
-The local environment remains unchanged: `.env.example` defaults to `APP_ENV=development`, `BACKEND_PUBLIC_URL=http://127.0.0.1:8000`, `FRONTEND_ORIGIN=http://127.0.0.1:5173`, blank `RECALL_API_TOKEN`, local Postgres/Redis URLs, and filesystem storage. With `RECALL_API_TOKEN` blank, local API auth is disabled.
-
-The desktop app opens both the full dashboard and a compact always-on-top overlay window. Use the overlay when you are in Zoom, Microsoft Teams, or Google Meet desktop/web meetings.
-
-## Desktop Packaging
-
-The existing Electron dev workflow is unchanged:
+Run the desktop app in a third terminal:
 
 ```bash
 cd frontend
-RECALL_START_BACKEND=false npm run electron
+npm install
+RECALL_START_BACKEND=false RECALL_START_WORKER=false npm run electron
 ```
+
+The Electron app opens both the full dashboard and a compact always-on-top overlay. The manual three-terminal setup above is easiest to debug. Electron can also spawn the backend and worker automatically when the backend virtual environment is installed and `RECALL_START_BACKEND` / `RECALL_START_WORKER` are not set to `false`.
+
+Check backend health:
+
+```bash
+curl -sS http://127.0.0.1:8000/health
+```
+
+Expected:
+
+```json
+{"status":"ok","app":"Re: Call"}
+```
+
+## Local Development Notes
+
+The default `.env.example` is local-development friendly:
+
+```bash
+APP_ENV=development
+BACKEND_PUBLIC_URL=http://127.0.0.1:8000
+FRONTEND_ORIGIN=http://127.0.0.1:5173
+VITE_API_BASE_URL=http://127.0.0.1:8000
+RECALL_API_TOKEN=
+DATABASE_URL=postgresql+asyncpg://recall:recall@localhost:5433/recall
+REDIS_URL=redis://localhost:6379/0
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+S3_BUCKET_NAME=
+LOCAL_STORAGE_DIR=./storage
+RUN_MIGRATIONS_ON_STARTUP=false
+```
+
+When `RECALL_API_TOKEN` is blank, local API auth is disabled.
+
+The worker must listen on every routed queue:
+
+- `transcription`: chunk and full-meeting transcription
+- `analysis`: notes, exports, embeddings, and post-processing
+- `live_insights`: live summaries, suggested answers, chart cards, and overlay state
+
+## Docker Workflows
+
+Default Compose runs local infrastructure only:
+
+```bash
+docker compose up -d
+```
+
+To run the API and worker in Docker too:
+
+```bash
+cp .env.example .env
+# Edit .env and set OPENAI_API_KEY first.
+RUN_MIGRATIONS_ON_STARTUP=true docker compose --profile app up --build -d
+```
+
+The app profile builds `backend/Dockerfile`, includes `ffmpeg`, runs the API on `${API_PORT:-8000}`, and shares the `app_storage` volume between API and worker at `/app/storage`.
+
+For a fuller app-stack variant with restart policies, persistent Redis append-only data, and a required database password:
+
+```bash
+POSTGRES_PASSWORD=replace-me RUN_MIGRATIONS_ON_STARTUP=true docker compose -f docker-compose.app.yml up --build -d
+```
+
+When the Docker API is already running, launch Electron against it:
+
+```bash
+cd frontend
+RECALL_START_BACKEND=false RECALL_START_WORKER=false npm run electron
+```
+
+## Desktop App And Overlay
+
+The desktop app has two Electron windows:
+
+- Main dashboard: meeting history, recording controls, notes, transcript, live insights, search, imports, exports, and theme toggle.
+- Always-on-top overlay: compact meeting controls plus live cards for answers, charts, risks, actions, objectives, and summary.
+
+On macOS, system audio capture is enabled by default when the helper exists. Re: Call still records microphone audio if the helper is missing or permissions are denied.
+
+Force mic-only mode:
+
+```bash
+RECALL_ENABLE_SYSTEM_AUDIO=false
+```
+
+Build the native helper locally:
+
+```bash
+cd native/macos-screen-capture
+CLANG_MODULE_CACHE_PATH=/private/tmp/recall-clang-cache swift build --cache-path /private/tmp/recall-swiftpm-cache
+```
+
+The helper uses ScreenCaptureKit and requires macOS permission:
+
+```text
+System Settings > Privacy & Security > Screen & System Audio Recording
+```
+
+Enable it for the process launching the app, such as Terminal, Electron, or the packaged app.
+
+You can override helper discovery with:
+
+```bash
+RECALL_SYSTEM_AUDIO_HELPER_BIN=/absolute/path/to/recall-macos-capture
+```
+
+## Browser Meeting Overlay Extension
+
+The unpacked extension in `extension/` works on:
+
+- Google Meet web
+- Microsoft Teams web
+- Zoom web client
+
+Load it locally:
+
+1. Start the backend API and Celery worker.
+2. Open `chrome://extensions` or `edge://extensions`.
+3. Enable Developer mode.
+4. Choose Load unpacked.
+5. Select the `extension/` directory.
+6. Open the Re: Call extension popup.
+7. Keep the backend URL as `http://127.0.0.1:8000` for local development.
+8. Leave the API token blank unless your backend has `RECALL_API_TOKEN` set.
+
+The extension is consent-first: it asks before recording, then Chrome asks which tab to share. Choose the meeting tab and enable tab audio.
+
+The extension does not cover native Zoom or Teams desktop apps. Use the Electron desktop overlay for those.
+
+## Transcript Integrations
+
+Re: Call can sync provider-created transcripts and run them through the same analysis, embeddings, search, and export pipeline as recorded calls.
+
+Supported sources:
+
+- Zoom cloud recording transcripts
+- Google Meet conference transcripts
+- Microsoft Teams `.vtt` transcripts through Microsoft Graph
+- Manual upload or paste for `.vtt`, `.srt`, `.txt`, and `.docx`
+
+Local OAuth callback URLs:
+
+```text
+Zoom:      http://127.0.0.1:8000/api/integrations/zoom/callback
+Google:    http://127.0.0.1:8000/api/integrations/meet/callback
+Microsoft: http://127.0.0.1:8000/api/integrations/teams/callback
+```
+
+Provider requirements:
+
+- Zoom needs cloud recording transcription enabled and cloud recording read scopes.
+- Google Meet needs transcription enabled and completed for the conference record.
+- Microsoft Teams needs a work or school account, an exact Teams meeting join URL, and may require tenant admin approval for transcript permissions.
+
+## Exports
+
+The export menu supports:
+
+- PowerPoint (`pptx`)
+- Markdown (`markdown` or `md`)
+- PDF (`pdf`)
+
+API endpoints:
+
+```http
+POST /api/export/{meeting_id}?format=pptx
+GET  /api/export/{meeting_id}/download?format=markdown
+```
+
+Chart cards are exported as structured chart sections/slides when possible. Supported chart types are:
+
+- `line_chart`
+- `bar_chart`
+- `table`
+- `timeline`
+- `needs_data`
+
+## Search
+
+After processing completes, Re: Call chunks the transcript, embeds each chunk, stores vectors in `transcript_chunks`, and supports natural-language search through:
+
+```http
+POST /api/search
+{
+  "query": "What did we decide about the mobile launch?",
+  "limit": 5
+}
+```
+
+The RAG service retrieves relevant transcript chunks by cosine similarity and asks the configured chat model to answer from the retrieved meeting context.
+
+## Storage
+
+Local development uses filesystem storage when `S3_BUCKET_NAME` is blank. Files are written under `backend/storage/` and served through `/api/files/...`.
+
+Production should use S3:
+
+```bash
+S3_BUCKET_NAME=your-production-bucket
+AWS_REGION=us-east-1
+```
+
+Provide AWS credentials through the deployment secret manager, environment variables, or an instance/task role. The app needs object read/write access for the configured bucket or prefix, for example:
+
+```text
+s3:GetObject
+s3:PutObject
+```
+
+Do not rely on container-local disk for cloud production. API and worker processes may run on different instances, and deployments or restarts can replace container files.
+
+## Access Control
+
+Re: Call has a minimal bearer-token gate for backend access. It is disabled when `RECALL_API_TOKEN` is blank.
+
+When `RECALL_API_TOKEN` is set, protected HTTP routes require:
+
+```http
+Authorization: Bearer your-token
+```
+
+Protected websocket connections pass the same token as a `token` query parameter. The React app and Electron preload bridge pass the configured token automatically.
+
+Client token configuration:
+
+- Backend and Electron runtime: `RECALL_API_TOKEN`
+- Vite web build: `VITE_RECALL_API_TOKEN`
+- Browser extension: set the token in the extension popup
+
+This is a deployment gate, not multi-user authentication. Use HTTPS, private networking, secret rotation, and normal production controls for public deployments.
+
+## Production Configuration
+
+Set `APP_ENV=production` only when all production dependencies are ready. The backend fails fast if required values are missing, invalid, or still pointed at localhost.
+
+Production backend checklist:
+
+- `APP_ENV=production`
+- `BACKEND_PUBLIC_URL` set to the public HTTPS API URL
+- `FRONTEND_ORIGIN` set to the deployed frontend origin
+- `RECALL_API_TOKEN` set to a long random value of at least 24 characters
+- `DATABASE_URL` set to production Postgres, not localhost
+- `REDIS_URL` set to production Redis, not localhost
+- `CELERY_BROKER_URL` and `CELERY_RESULT_BACKEND` set only when they should differ from `REDIS_URL`
+- `OPENAI_API_KEY` supplied from secrets
+- `S3_BUCKET_NAME` and `AWS_REGION` set for S3 storage
+- AWS credentials or role-based access supplied by the runtime
+
+Example:
+
+```bash
+APP_ENV=production
+BACKEND_PUBLIC_URL=https://api.your-domain.example
+FRONTEND_ORIGIN=https://app.your-domain.example
+RECALL_API_TOKEN=replace-with-a-long-random-token
+DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@db.your-domain.example:5432/recall
+REDIS_URL=rediss://:PASSWORD@redis.your-domain.example:6379/0
+OPENAI_API_KEY=sk-...
+S3_BUCKET_NAME=your-production-bucket
+AWS_REGION=us-east-1
+```
+
+For a deployed Vite web UI:
+
+```bash
+VITE_APP_ENV=production
+VITE_API_BASE_URL=https://api.your-domain.example
+VITE_RECALL_API_TOKEN=replace-with-the-same-token-if-needed
+```
+
+For Electron pointed at a deployed backend:
+
+```bash
+APP_ENV=production RECALL_API_BASE_URL=https://api.your-domain.example RECALL_API_TOKEN=replace-with-a-long-random-token /Applications/Re\ Call.app/Contents/MacOS/Re\ Call
+```
+
+In Electron production mode, `RECALL_API_BASE_URL` is required, must be valid, and must not point to localhost.
+
+## Packaging
 
 Build the Vite frontend only:
 
@@ -102,267 +435,177 @@ cd frontend
 npm run dist
 ```
 
-Package output is written to `frontend/release/` by default. The package uses `electron-builder`. Packaged Electron keeps using the `app.isPackaged` branch in `frontend/electron/main.js`, which loads `frontend/dist/index.html` from the packaged app. The package scripts build the macOS ScreenCaptureKit helper first, then include it at `Contents/Resources/native/recall-macos-capture` alongside the built `dist/` UI, `electron/` main/preload code, and `public/` assets such as the Re: Call logos.
+Package output is written to `frontend/release/`.
 
-The packaged app does not embed production secrets or API keys. By default, development and local validation still expect the backend at `http://127.0.0.1:8000`. To point a packaged app at a deployed backend, set `RECALL_API_BASE_URL` and `RECALL_API_TOKEN` when launching Electron. When `APP_ENV=production`, Electron requires `RECALL_API_BASE_URL` to be set and non-local, and requires `RECALL_API_TOKEN`:
+Packaging notes:
 
-```bash
-APP_ENV=production RECALL_API_BASE_URL=https://api.your-domain.example RECALL_API_TOKEN=replace-with-a-long-random-token /Applications/Re\ Call.app/Contents/MacOS/Re\ Call
-```
+- `electron-builder` config lives in `frontend/package.json`.
+- App ID is `com.recall.desktop`.
+- Product name is `Re: Call`.
+- macOS artifacts use `Re-Call-*` names and `frontend/build/icon.icns`.
+- Package scripts build the macOS ScreenCaptureKit helper first.
+- The helper is bundled at `Contents/Resources/native/recall-macos-capture`.
+- Production signing and notarization are intentionally not configured with repository secrets.
 
-For a local backend that is already running, keep automatic spawning off:
-
-```bash
-RECALL_API_BASE_URL=http://127.0.0.1:8000 RECALL_START_BACKEND=false /Applications/Re\ Call.app/Contents/MacOS/Re\ Call
-```
-
-This packaging config is frontend/Electron-only. If a packaged build is expected to spawn a local Python backend, the backend directory must be made available where Electron looks for it, and the Python runtime, backend dependencies, `ffmpeg`, Redis/Postgres access, and `.env` values must already be present on that machine.
-
-macOS metadata is configured with app ID `com.recall.desktop`, product name `Re: Call`, `Re-Call-*` artifact names, a generated app icon at `frontend/build/icon.icns`, and microphone/screen-capture permission descriptions. Production signing and notarization are intentionally not configured with secrets. For release, add Developer ID signing outside the repo or through CI secrets, enable hardened runtime/entitlements as needed, then add an `@electron/notarize` after-sign step or equivalent `electron-builder` notarization flow with Apple credentials supplied from the release environment.
-
-## Docker Compose
-
-The default Compose workflow still runs only local infrastructure:
+Important caveat: the packaged app does not yet bundle a Python backend runtime, Python dependencies, Redis, Postgres, ffmpeg, migrations, or secrets. For local validation, run the backend separately and launch the packaged app with:
 
 ```bash
-docker compose up -d
+RECALL_API_BASE_URL=http://127.0.0.1:8000 RECALL_START_BACKEND=false RECALL_START_WORKER=false /Applications/Re\ Call.app/Contents/MacOS/Re\ Call
 ```
 
-This starts pgvector Postgres on `127.0.0.1:5433` and Redis on `127.0.0.1:6379`, so the non-Docker backend commands above continue to work.
+## Processing Pipeline
 
-To run the FastAPI API and Celery worker in Docker too, create `.env` and set at least `OPENAI_API_KEY`:
+Recording flow:
+
+1. Frontend starts a meeting with `POST /api/recording/start`.
+2. Mic chunks upload to `POST /api/recording/chunk`.
+3. macOS system-audio chunks, when available, upload to `POST /api/recording/system-chunk`.
+4. Redis buffers chunk bytes and metadata while live transcription tasks run.
+5. Stop calls `POST /api/recording/stop`.
+6. The backend stores audio locally or in S3, writes capture diagnostics, clears chunk buffers, and starts the Celery pipeline.
+
+Celery flow:
+
+1. `transcribe_full_task` transcribes mic audio, optional system audio chunks, and merges timed transcript segments.
+2. `analyze_meeting_task` writes structured notes and preserves live state.
+3. `embed_meeting_task` chunks and embeds the transcript into pgvector.
+4. `generate_pptx_task` creates the default PowerPoint export.
+
+Live insight flow:
+
+1. Chunk transcripts update Redis live state.
+2. Live memory tracks summary, questions, actions, and key points.
+3. Live insight tasks generate overlay cards, risks, suggested answers, and chart cards.
+4. Websocket events update the dashboard and overlay.
+
+## API Overview
+
+```text
+GET  /health
+
+/api/recording
+  POST /start
+  POST /chunk
+  POST /system-chunk
+  POST /stop
+
+/api/meetings
+  GET    /
+  GET    /{meeting_id}
+  GET    /{meeting_id}/live-memory
+  DELETE /{meeting_id}
+
+/api/export
+  POST /{meeting_id}
+  GET  /{meeting_id}/download
+
+/api/integrations
+  GET  /connections
+  GET  /{provider}/authorize
+  GET  /{provider}/callback
+  POST /{provider}/sync
+  POST /transcript
+
+/api/search
+  POST /
+
+/api/files
+  GET /...
+
+/api/ws
+  Websocket meeting events
+```
+
+## Verification Commands
+
+Backend compile:
 
 ```bash
-cp .env.example .env
-RUN_MIGRATIONS_ON_STARTUP=true docker compose --profile app up --build -d
+cd backend
+env PYTHONPYCACHEPREFIX=/private/tmp/recall-pycache .venv/bin/python -m compileall -q .
 ```
 
-The app containers use the same backend code and environment variable names as local dev. Compose overrides container networking so `DATABASE_URL` points to `postgres:5432`, and `REDIS_URL`, `CELERY_BROKER_URL`, and `CELERY_RESULT_BACKEND` point to `redis:6379`.
-
-The API runs:
-
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
-The worker runs the existing Celery app on the queues used by recording, transcription, analysis, exports, and live insights:
-
-```bash
-celery -A tasks.celery_app:celery_app worker --loglevel=info -Q transcription,analysis,live_insights
-```
-
-The backend image includes `ffmpeg`. API and worker share the `app_storage` Docker volume at `/app/storage`, so generated audio, files, and exports survive local container restarts when `S3_BUCKET_NAME` is blank. Treat this filesystem mode as local/dev only unless you are deliberately running a single-host deployment with durable shared storage; cloud production should set `S3_BUCKET_NAME`.
-
-Electron can use the Docker API at `http://127.0.0.1:8000`. When the API is already running in Docker, start Electron with:
+Frontend build:
 
 ```bash
 cd frontend
-RECALL_START_BACKEND=false npm run electron
+npm run build
 ```
 
-## Environment
-
-Copy `.env.example` for local development. Its defaults are intentionally local:
+Electron syntax checks:
 
 ```bash
-APP_ENV=development
-BACKEND_PUBLIC_URL=http://127.0.0.1:8000
-FRONTEND_ORIGIN=http://127.0.0.1:5173
-VITE_APP_ENV=development
-VITE_API_BASE_URL=http://127.0.0.1:8000
-RECALL_API_TOKEN=
-VITE_RECALL_API_TOKEN=
-OPENAI_API_KEY=
-DATABASE_URL=postgresql+asyncpg://recall:recall@localhost:5433/recall
-REDIS_URL=redis://localhost:6379/0
-CELERY_BROKER_URL=redis://localhost:6379/0
-CELERY_RESULT_BACKEND=redis://localhost:6379/0
-S3_BUCKET_NAME=
-LOCAL_STORAGE_DIR=./storage
+cd frontend
+node --check electron/main.js
+node --check electron/preload.js
 ```
 
-Leave `S3_BUCKET_NAME` blank for local development. Audio and generated export files will be copied under `backend/storage/` and served through `/api/files/...`.
-
-Do not rely on local container disk for cloud production. Many cloud platforms replace containers during deploys, restarts, autoscaling, or health recovery, and API and worker processes may run on different instances. If `S3_BUCKET_NAME` is blank in that shape of deployment, recordings and generated exports can disappear or become unavailable to another process.
-
-For production/cloud storage, configure:
-
-- `S3_BUCKET_NAME` for the bucket that stores recordings and exports
-- `AWS_REGION` for that bucket
-- AWS credentials from the deployment secret manager, or an instance/task role with bucket access
-- IAM permission to read and write objects for the configured bucket or prefix, for example `s3:GetObject` and `s3:PutObject` on `arn:aws:s3:::your-bucket/your-prefix/*`
-
-For Docker app services, leave the Docker-specific URL values blank to use the bundled Compose Postgres and Redis services. The local `DATABASE_URL` and Redis URLs remain pointed at `localhost` for non-Docker backend development.
-
-## Access Control
-
-Re: Call has a minimal bearer-token deployment gate for the FastAPI backend. It is disabled by default when `RECALL_API_TOKEN` is blank, which keeps local dev, Electron recording, browser-extension recording, chunk uploads, transcription, exports, live insights, and WebSocket updates working without extra setup.
-
-When `RECALL_API_TOKEN` is set, protected HTTP endpoints require:
-
-```http
-Authorization: Bearer your-token
-```
-
-Protected WebSocket connections pass the same token as a `token` query parameter. The React app does this automatically when a token is configured.
-
-How clients pass the token:
-
-- Backend and Electron runtime: set `RECALL_API_TOKEN` in the environment.
-- Vite web UI: set `VITE_RECALL_API_TOKEN` to the same value for builds that talk directly to a protected backend.
-- Chrome/Edge extension: enter the same token in the extension popup. Leave it blank for local dev.
-
-This is a basic deployment gate to avoid exposing an unauthenticated public API. It is not multi-user auth, account management, OAuth login, row-level authorization, or a substitute for HTTPS, private networking, secret rotation, and normal production controls.
-
-## Production Environment
-
-Set `APP_ENV=production` only for deployed API, worker, and Electron runtimes. In production mode, backend startup fails fast if required values are missing, invalid, or still pointing to localhost. Explicit `CELERY_BROKER_URL` and `CELERY_RESULT_BACKEND` are optional if they should reuse `REDIS_URL`, but if either is set it must also be non-local.
-
-Production checklist:
-
-- `APP_ENV=production`
-- `BACKEND_PUBLIC_URL` set to the public HTTPS API URL
-- `FRONTEND_ORIGIN` set to the deployed frontend origin
-- `RECALL_API_TOKEN` set to a long random value of at least 24 characters
-- `DATABASE_URL` set to production Postgres, not localhost
-- `REDIS_URL` set to production Redis, not localhost
-- `CELERY_BROKER_URL` and `CELERY_RESULT_BACKEND` set only when they should differ from `REDIS_URL`
-- `OPENAI_API_KEY` supplied from secrets
-- `S3_BUCKET_NAME` set so recordings and exports use S3 instead of local disk
-- `AWS_REGION` set for the S3 bucket
-- AWS credentials supplied through environment variables, instance/task roles, or the deployment platform
-- IAM read/write object access scoped to the configured bucket or prefix
-- `VITE_APP_ENV=production`, `VITE_API_BASE_URL`, and `VITE_RECALL_API_TOKEN` set if deploying the Vite web UI outside Electron
-- `RECALL_API_BASE_URL` and `RECALL_API_TOKEN` set when Electron should talk to the deployed backend
-
-Example production values use placeholders only:
+Native helper build:
 
 ```bash
-APP_ENV=production
-BACKEND_PUBLIC_URL=https://api.your-domain.example
-FRONTEND_ORIGIN=https://app.your-domain.example
-RECALL_API_TOKEN=replace-with-a-long-random-token
-DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@db.your-domain.example:5432/recall
-REDIS_URL=rediss://:PASSWORD@redis.your-domain.example:6379/0
-CELERY_BROKER_URL=rediss://:PASSWORD@redis.your-domain.example:6379/0
-CELERY_RESULT_BACKEND=rediss://:PASSWORD@redis.your-domain.example:6379/0
-OPENAI_API_KEY=sk-...
-S3_BUCKET_NAME=your-production-bucket
-AWS_REGION=us-east-1
-# Leave static keys blank when using an instance/task role.
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=
-VITE_APP_ENV=production
-VITE_API_BASE_URL=https://api.your-domain.example
-VITE_RECALL_API_TOKEN=replace-with-the-same-token-if-building-the-web-ui
+cd native/macos-screen-capture
+CLANG_MODULE_CACHE_PATH=/private/tmp/recall-clang-cache swift build --cache-path /private/tmp/recall-swiftpm-cache
 ```
 
-If these values are not ready yet, keep `APP_ENV=development`; production mode is intentionally strict so deployments cannot silently fall back to localhost services.
+## Troubleshooting
 
-For manual production worker startup, run one worker that listens to every routed queue:
+### `npm error ENOENT Could not read package.json`
+
+Run npm from `frontend/`:
 
 ```bash
-celery -A tasks.celery_app:celery_app worker --loglevel=info -Q transcription,analysis,live_insights --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
+cd frontend
+npm run electron
 ```
 
-## Export Formats
+### `Address already in use` on port 8000
 
-The Export menu supports:
-
-- PowerPoint (`.pptx`)
-- Markdown (`.md`)
-- PDF (`.pdf`)
-
-## Transcript Integrations
-
-Re: Call can connect to Zoom, Microsoft Teams, and Google Meet from the dashboard sidebar, sync the provider-created transcript, then run the same Re: Call notes, insights, action items, search embedding, and export pipeline used for recorded calls.
-
-Provider behavior:
-
-- Zoom syncs transcript files from cloud recordings. Zoom must have cloud recording transcription enabled, and the OAuth app needs cloud recording read scopes.
-- Google Meet syncs transcript entries from the Google Meet API. Meet transcription must be enabled and finished for the conference record.
-- Microsoft Teams syncs transcript `.vtt` content through Microsoft Graph. You must connect a work or school Microsoft account, paste the exact Teams meeting join URL, and your tenant may need admin approval for transcript permissions.
-
-For local OAuth redirects, add these callback URLs to your provider apps:
-
-- Zoom: `http://127.0.0.1:8000/api/integrations/zoom/callback`
-- Google: `http://127.0.0.1:8000/api/integrations/meet/callback`
-- Microsoft: `http://127.0.0.1:8000/api/integrations/teams/callback`
-
-Manual upload/paste remains available as a fallback for `.vtt`, `.srt`, `.txt`, and `.docx` transcripts.
-
-## Browser Meeting Overlay Extension
-
-Re: Call includes an unpacked Chrome/Edge extension in `extension/`. It adds a visible overlay on:
-
-- Google Meet web
-- Microsoft Teams web
-- Zoom web client
-
-The extension does not cover the native Zoom or Teams desktop apps. Those need a separate native overlay or platform-specific integration.
-
-To load it locally:
-
-1. Make sure the backend API and Celery worker are running.
-2. Open `chrome://extensions` or `edge://extensions`.
-3. Turn on Developer mode.
-4. Choose Load unpacked.
-5. Select `/Users/ajayk/Desktop/ReCall/extension`.
-6. Click the Re: Call extension icon, keep the backend URL as `http://127.0.0.1:8000`, leave API token blank for local dev, and click Test. If your backend has `RECALL_API_TOKEN` set, enter the same token in the popup.
-
-In a meeting, the overlay asks before recording. When you click Record, Chrome asks what to share. Choose the current meeting tab and enable tab audio, then grant microphone permission. When you stop recording, or when the overlay detects the meeting ended, it waits for transcription and then asks whether to export as PowerPoint, PDF, or Markdown.
-
-## Desktop Overlay
-
-The Electron app includes a separate always-on-top Re: Call overlay window. It is designed to float visibly above Zoom, Microsoft Teams, Google Meet, or other meeting apps.
-
-Run it with:
+Find and stop the old backend process:
 
 ```bash
-cd /Users/ajayk/Desktop/ReCall/frontend
-RECALL_START_BACKEND=false npm run electron
+lsof -nP -iTCP:8000 -sTCP:LISTEN
+kill <pid>
 ```
 
-Keep the backend API and Celery worker running in their own terminals. On macOS, the overlay now tries to capture both microphone audio and system audio through the native ScreenCaptureKit helper. If the helper is unavailable or macOS permission is missing, recording falls back to microphone-only mode. Set `RECALL_ENABLE_SYSTEM_AUDIO=false` to force mic-only recording.
+### Alembic config not found
 
-After the meeting is stopped and processing completes, the overlay asks whether to export as PowerPoint, PDF, or Markdown.
+Run Alembic from `backend/`:
 
-## Architecture
-
-```text
-Electron + React
-      |
-      v
-FastAPI REST + WebSocket API
-      |
-      +------> Redis audio chunk buffer
-      |             |
-      |             v
-      |       Celery Workers
-      |         |   |   |
-      |         |   |   +--> PPTX / Markdown / PDF export -> local storage (dev) or AWS S3 (production)
-      |         |   +------> GPT analysis
-      |         +----------> Whisper transcription
-      |
-      +------> PostgreSQL 16
-                    |
-                    v
-                pgvector
-                    |
-                    v
-              RAG search over past calls
+```bash
+cd backend
+source .venv/bin/activate
+PYTHONDONTWRITEBYTECODE=1 python -m alembic upgrade head
 ```
 
-## RAG Search
+### `S3_BUCKET_NAME is required`
 
-After a meeting completes, Re: Call chunks the transcript, embeds each chunk with `text-embedding-3-large` at 1536 dimensions, and stores vectors in Postgres via pgvector. The search panel sends natural-language questions to:
+You are running with `APP_ENV=production`. For local dev, keep `APP_ENV=development` and leave `S3_BUCKET_NAME` blank. For production, configure S3.
 
-```http
-POST /api/search
-{
-  "query": "What did we decide about the mobile launch?",
-  "limit": 5
-}
+### System audio helper unavailable
+
+Build the helper:
+
+```bash
+cd native/macos-screen-capture
+CLANG_MODULE_CACHE_PATH=/private/tmp/recall-clang-cache swift build --cache-path /private/tmp/recall-swiftpm-cache
 ```
 
-The API embeds the query, runs cosine similarity against transcript chunks, and asks the chat model to answer only from the retrieved meeting context.
+Then restart Electron. If system audio is still unavailable, check macOS Screen & System Audio Recording permission.
+
+### Computer audio only says `Computer audio`
+
+Current speaker labels for system audio are inferred from transcript text. They are not true acoustic diarization.
+
+## Known Limitations
+
+- macOS system-audio capture is experimental.
+- Windows system-audio capture is not implemented yet.
+- Speaker labels for system audio are best-effort text inference, not voiceprint diarization.
+- Browser extension support is limited to web meeting clients.
+- Native Zoom and Teams app coverage depends on the desktop overlay and system audio helper.
+- Packaged desktop builds do not yet provision the backend runtime, Redis/Postgres, ffmpeg, migrations, or secrets end to end.
+- Production macOS signing and notarization still need a release-environment setup.
+- Windows and Linux packaging targets exist in config but have not been fully validated.
+- OAuth app setup still requires provider-side configuration and approval depending on account or tenant.
+- `OverlayAskBar.jsx` is currently frontend-local placeholder behavior; a backend ask/RAG route is still needed.
+- Deleting a meeting removes database history, but storage cleanup for local/S3 audio and generated exports can be improved.
