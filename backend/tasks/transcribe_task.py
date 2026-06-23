@@ -14,8 +14,8 @@ from services.events import publish_meeting_event
 from services.live_memory_service import read_live_memory, update_live_memory
 from services.overlay_chart_service import generate_spoken_chart_cards, merge_chart_cards
 from services.s3_service import download_file
-from services.speaker_service import label_computer_speakers
-from services.whisper_service import transcribe, transcribe_verbose
+from services.speaker_service import label_computer_speakers, label_microphone_speakers
+from services.whisper_service import transcribe_verbose
 from tasks.celery_app import celery_app
 from tasks.live_insight_task import queue_live_insights_if_due
 from tasks.task_utils import mark_meeting_error
@@ -23,6 +23,7 @@ from tasks.task_utils import mark_meeting_error
 
 LOW_SIGNAL_RMS_THRESHOLD = 0.004
 LOW_SIGNAL_PEAK_THRESHOLD = 0.025
+MIC_SPEAKER_LIMIT = 3
 SILENCE_HALLUCINATION_PHRASES = {
     "you",
     "thank you",
@@ -73,13 +74,11 @@ async def _transcribe_full(session_id: UUID) -> str:
         local_path = Path("/tmp") / f"{session_id}{suffix}"
         download_file(meeting.audio_s3_key, local_path)
 
-        if system_audio_keys:
-            mic_result = await asyncio.to_thread(transcribe_verbose, local_path)
-            mic_transcript = mic_result["text"]
-            mic_segments = _source_segments(mic_result, source="mic", label="You")
-        else:
-            mic_transcript = await asyncio.to_thread(transcribe, local_path)
-            mic_segments = []
+        mic_result = await asyncio.to_thread(transcribe_verbose, local_path)
+        mic_transcript = mic_result["text"]
+        mic_segments = _source_segments(mic_result, source="mic", label="Local Speaker 1")
+        if mic_segments:
+            mic_segments = await asyncio.to_thread(label_microphone_speakers, mic_segments, MIC_SPEAKER_LIMIT)
 
         system_transcript = ""
         system_errors: list[str] = []
@@ -93,22 +92,32 @@ async def _transcribe_full(session_id: UUID) -> str:
             if system_segments:
                 system_segments = await asyncio.to_thread(label_computer_speakers, system_segments)
 
-        transcript = mic_transcript
+        transcript = _format_chronological_transcript([*mic_segments, *system_segments]) or mic_transcript
+        if mic_segments:
+            notes["mic_speaker_attribution"] = {
+                "mode": "text_inferred",
+                "max_speakers": MIC_SPEAKER_LIMIT,
+                "segments": len(mic_segments),
+            }
         if system_transcript:
-            transcript = _format_chronological_transcript([*mic_segments, *system_segments])
             if not transcript:
-                transcript = "\n\n".join(
-                    [
-                        f"You:\n{mic_transcript.strip()}",
-                        f"Computer audio:\n{system_transcript.strip()}",
-                    ]
-                ).strip()
+                transcript = _fallback_transcript_text(
+                    mic_transcript=mic_transcript,
+                    system_transcript=system_transcript,
+                )
             notes["system_transcript"] = system_transcript
             notes["transcript_merge"] = {
                 "mode": "time_aligned_mic_and_system",
                 "mic_segments": len(mic_segments),
                 "system_segments": len(system_segments),
+                "mic_speaker_attribution": f"text_inferred_max_{MIC_SPEAKER_LIMIT}",
                 "computer_speaker_attribution": "text_inferred",
+            }
+        elif mic_segments:
+            notes["transcript_merge"] = {
+                "mode": "time_aligned_mic",
+                "mic_segments": len(mic_segments),
+                "mic_speaker_attribution": f"text_inferred_max_{MIC_SPEAKER_LIMIT}",
             }
         if system_errors:
             notes["system_transcription_errors"] = system_errors
@@ -189,9 +198,11 @@ async def _transcribe_live_chunk(session_id: UUID, chunk_index: int, source: str
             return {"session_id": str(session_id), "chunk_index": chunk_index, "source": normalized_source, "status": "filtered"}
 
         offset_seconds = 0.0 if normalized_source == "mic" else _source_offset_seconds(metadata, chunk_index)
-        label = "Computer audio" if normalized_source == "system" else "You"
+        label = "Computer audio" if normalized_source == "system" else "Local Speaker 1"
         segments = _source_segments(result, source=normalized_source, label=label, offset_seconds=offset_seconds)
-        if normalized_source == "system":
+        if normalized_source == "mic":
+            segments = await asyncio.to_thread(label_microphone_speakers, segments, MIC_SPEAKER_LIMIT)
+        elif normalized_source == "system":
             segments = [
                 segment
                 for segment in segments
@@ -382,6 +393,15 @@ def _transcribe_system_audio(session_id: UUID, system_audio_keys: list[dict]) ->
             errors.append(f"{key}: {error}")
 
     return "\n".join(parts).strip(), errors, merged_segments
+
+
+def _fallback_transcript_text(*, mic_transcript: str, system_transcript: str) -> str:
+    sections = []
+    if mic_transcript.strip():
+        sections.append(f"Local microphone:\n{mic_transcript.strip()}")
+    if system_transcript.strip():
+        sections.append(f"Computer audio:\n{system_transcript.strip()}")
+    return "\n\n".join(sections).strip()
 
 
 def _source_segments(
