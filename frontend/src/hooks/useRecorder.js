@@ -4,6 +4,8 @@ import { withApiAuth } from "../apiAuth.js";
 const START_TIMEOUT_MS = 12000;
 const CHUNK_TIMEOUT_MS = 20000;
 const SILENCE_RMS_THRESHOLD = 0.012;
+const MAX_RECORDING_SECONDS = 60 * 60;
+const RECORDING_AUDIO_BITS_PER_SECOND = 48000;
 
 function stopStream(stream) {
   stream?.getTracks().forEach((track) => track.stop());
@@ -40,7 +42,10 @@ function getRecorderOptions() {
 
   const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
   const mimeType = candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate));
-  return mimeType ? { mimeType } : undefined;
+  return {
+    ...(mimeType ? { mimeType } : {}),
+    audioBitsPerSecond: RECORDING_AUDIO_BITS_PER_SECOND,
+  };
 }
 
 async function getMicrophoneStream() {
@@ -49,6 +54,9 @@ async function getMicrophoneStream() {
   }
   return navigator.mediaDevices.getUserMedia({
     audio: {
+      channelCount: { ideal: 2 },
+      sampleRate: { ideal: 48000 },
+      sampleSize: { ideal: 16 },
       echoCancellation: false,
       noiseSuppression: false,
       autoGainControl: true,
@@ -123,6 +131,7 @@ export function useRecorder({
   getStartPayload,
   startSystemAudioCapture,
   startTimeoutMs = START_TIMEOUT_MS,
+  maxRecordingSeconds = MAX_RECORDING_SECONDS,
 }) {
   const [status, setStatus] = useState("idle");
   const [sessionId, setSessionId] = useState(null);
@@ -143,6 +152,7 @@ export function useRecorder({
   const startAttemptRef = useRef(0);
   const micChunkIndexRef = useRef(0);
   const lastMicChunkOffsetMsRef = useRef(0);
+  const maxRecordingStopRequestedRef = useRef(false);
 
   useEffect(() => {
     if (status !== "recording") {
@@ -206,6 +216,7 @@ export function useRecorder({
     uploadPromisesRef.current = [];
     micChunkIndexRef.current = 0;
     lastMicChunkOffsetMsRef.current = 0;
+    maxRecordingStopRequestedRef.current = false;
     setElapsedSeconds(0);
     setAudioLevel(0);
     setAudioWarning("");
@@ -221,6 +232,7 @@ export function useRecorder({
     setAudioLevel(0);
     setAudioWarning("");
     setSystemAudioWarning("");
+    maxRecordingStopRequestedRef.current = false;
     setStatus("starting");
     let stream = null;
     let systemCapture = null;
@@ -417,10 +429,24 @@ export function useRecorder({
       setStatus("processing");
       onProcessingStarted?.(sessionId);
     } catch (stopError) {
+      maxRecordingStopRequestedRef.current = false;
       setStatus("idle");
       setError(stopError.message);
     }
   }, [apiBaseUrl, apiToken, onProcessingStarted, sessionId, startTimeoutMs]);
+
+  useEffect(() => {
+    if (status !== "recording" || !maxRecordingSeconds || maxRecordingStopRequestedRef.current) {
+      return;
+    }
+    if (elapsedSeconds < maxRecordingSeconds) {
+      return;
+    }
+
+    maxRecordingStopRequestedRef.current = true;
+    setAudioWarning("Recording limit reached. Processing this meeting now.");
+    stop();
+  }, [elapsedSeconds, maxRecordingSeconds, status, stop]);
 
   return {
     status,
